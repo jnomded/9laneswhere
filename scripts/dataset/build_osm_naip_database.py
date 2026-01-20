@@ -18,16 +18,16 @@ from pystac_client import Client
 import planetary_computer as pc
 from contextlib import ExitStack
 
-# ----------------------
+
 # Configuration
-# ----------------------
+
 
 # Approx continental US bounding box 
 MIN_LAT, MIN_LON = 24.39, -125.00
 MAX_LAT, MAX_LON = 49.38, -66.93
 
 OUTPUT_DIR = Path("dataset_osm")
-CHIP_SIZE = 1024  # pixels
+CHIP_SIZE = 224  # pixels compatible with MobileNetV2
 MAX_POSITIVES = 12 
 MAX_NEGATIVES = 15
 NAIP_YEAR = None
