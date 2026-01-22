@@ -31,7 +31,7 @@ CHIP_SIZE = 224  # pixels compatible with MobileNetV2
 MAX_POSITIVES = 12 
 MAX_NEGATIVES = 15
 NAIP_YEAR = None
-
+ 
 PC_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 R_EARTH = 6371000.0
