@@ -28,8 +28,8 @@ MAX_LAT, MAX_LON = 49.38, -66.93
 
 OUTPUT_DIR = Path("dataset_osm")
 CHIP_SIZE = 1024  # pixels compatible with MobileNetV2
-MAX_POSITIVES = 1200 #1200
-MAX_NEGATIVES = 1500 #1500
+MAX_POSITIVES = 1 #1200
+MAX_NEGATIVES = 1 #1500
 NAIP_YEAR = None
  
 PC_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
@@ -134,11 +134,18 @@ def get_osm_data() -> Tuple[List[Sample], List[Sample]]:
     # 2. Negatives: Stadiums, pitches, etc.
     print("Fetching negatives...")
     query_neg = f"""
-        [out:json][timeout:250];
+        [out:json][timeout:1000];
         (
           way["leisure"="stadium"]({box});
           relation["leisure"="stadium"]({box});
-          way["leisure"="pitch"]["sport"~"soccer|football|rugby|baseball"]({box});
+          node["leisure"="stadium"]({box});
+          way["leisure"="pitch"]({box});
+          relation["leisure"="pitch"]({box});
+          node["leisure"="pitch"]({box});
+          way["leisure"="sports_centre"]({box});
+          node["leisure"="sports_centre"]({box});
+          way["leisure"="golf_course"]({box});
+          node["leisure"="golf_course"]({box});
         );
         out center {int(MAX_NEGATIVES * 2)};
     """
