@@ -150,11 +150,13 @@ def get_osm_data() -> Tuple[List[Sample], List[Sample]]:
     positives = filter_by_distance(positives, 80.0)
     negatives = filter_by_distance(negatives, 80.0)
 
-    # Shuffle candidates (we will stop in main when we hit MAX limits)
-    random.shuffle(positives)
-    random.shuffle(negatives)
+    # Subsample
+    if len(positives) > MAX_POSITIVES:
+        positives = random.sample(positives, MAX_POSITIVES)
+    if len(negatives) > MAX_NEGATIVES:
+        negatives = random.sample(negatives, MAX_NEGATIVES)
         
-    print(f"Candidate counts: {len(positives)} pos, {len(negatives)} neg")
+    print(f"Final counts: {len(positives)} pos, {len(negatives)} neg")
     return positives, negatives
 
 
@@ -304,24 +306,10 @@ def main():
         return
 
     csv_rows = []
-    print(f"Downloading images from candidates ({len(positives)} pos, {len(negatives)} neg) until targets met...")
+    print(f"Downloading images for {len(all_samples)} samples ({len(positives)} pos, {len(negatives)} neg)...")
     
-    count_pos = 0
-    count_neg = 0
-
     for i, s in enumerate(all_samples):
-        # Stop condition
-        if count_pos >= MAX_POSITIVES and count_neg >= MAX_NEGATIVES:
-            print("Reached target counts for both classes.")
-            break
-            
-        is_pos = (s.label == 1)
-        if is_pos and count_pos >= MAX_POSITIVES:
-            continue
-        if not is_pos and count_neg >= MAX_NEGATIVES:
-            continue
-
-        cls_name = "track" if is_pos else "not_track"
+        cls_name = "track" if s.label == 1 else "not_track"
         folder = OUTPUT_DIR / cls_name
         folder.mkdir(exist_ok=True)
         
@@ -330,7 +318,7 @@ def main():
         
         # Simple progress
         if i % 10 == 0:
-            print(f"[{i+1}/{len(all_samples)}] Processing {s.kind} {s.osmid} (Pos: {count_pos}/{MAX_POSITIVES}, Neg: {count_neg}/{MAX_NEGATIVES})...")
+            print(f"[{i+1}/{len(all_samples)}] Processing {s.kind} {s.osmid}...")
         
         try:
             if not filepath.exists():
@@ -340,18 +328,11 @@ def main():
                 str(filepath.relative_to(OUTPUT_DIR)),
                 s.label, s.lat, s.lon, s.osmid, s.primary_tag, s.sport_tag, s.kind
             ])
-            
-            if is_pos:
-                count_pos += 1
-            else:
-                count_neg += 1
-                
         except Exception as e:
             if "No NAIP data found" in str(e):
                 print(f"  Skipping {s.osmid} (likely outside US NAIP coverage)")
             else:
                 print(f"  Error processing {s.osmid}: {e}")
-            # Loop continues, effectively compensating by trying next candidate
 
     # Save Metadata
     csv_path = OUTPUT_DIR / "labels.csv"
