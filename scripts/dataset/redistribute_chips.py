@@ -6,6 +6,7 @@ import shutil
 import os
 from pathlib import Path
 import sys
+from typing import List, Optional, Any
 
 DATASET_DIR = Path("dataset_osm")
 CSV_PATH = DATASET_DIR / "labels.csv"
@@ -19,7 +20,7 @@ class ChipReviewApp:
         self.root.title("Positive Chip Reviewer")
         
         # State
-        self.rows = []
+        self.rows: List[Optional[List[str]]] = []
         self.headers = []
         self.current_queue_index = 0
         self.review_queue = [] # List of indices in self.rows to review
@@ -64,6 +65,8 @@ class ChipReviewApp:
         for i, row in enumerate(self.rows):
             # Row structure: [filepath, label, lat, lon, osmid, tag, sport, kind]
             # label is index 1
+            if row is None:
+                continue
             if row[1] == '1':
                 full_path = DATASET_DIR / row[0]
                 if full_path.exists():
