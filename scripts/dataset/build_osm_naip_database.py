@@ -28,8 +28,8 @@ MAX_LAT, MAX_LON = 49.38, -66.93
 
 OUTPUT_DIR = Path("dataset_osm")
 CHIP_SIZE = 1024  # pixels compatible with MobileNetV2
-MAX_POSITIVES = 1 #1200
-MAX_NEGATIVES = 1 #1500
+MAX_POSITIVES = 1500 #1200
+MAX_NEGATIVES = 1500 #1500
 NAIP_YEAR = None
  
 PC_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
@@ -126,7 +126,7 @@ def get_osm_data() -> Tuple[List[Sample], List[Sample]]:
           way["leisure"="track"]["sport"~"athletics|running"]({box});
           relation["leisure"="track"]["sport"~"athletics|running"]({box});
         );
-        out center {int(MAX_POSITIVES * 2)};
+        out center {int(MAX_POSITIVES * 5)};
     """
     data_pos = overpass_query(query_pos)
     positives = parse_overpass_elements(data_pos.get("elements", []), label=1, kind="positive")
@@ -147,7 +147,7 @@ def get_osm_data() -> Tuple[List[Sample], List[Sample]]:
           way["leisure"="golf_course"]({box});
           node["leisure"="golf_course"]({box});
         );
-        out center {int(MAX_NEGATIVES * 2)};
+        out center {int(MAX_NEGATIVES * 5)};
     """
     data_neg = overpass_query(query_neg)
     negatives = parse_overpass_elements(data_neg.get("elements", []), label=0, kind="hard_negative")
