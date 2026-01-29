@@ -184,7 +184,7 @@ def get_naip_href(item) -> str:
 
 
 def save_naip_chip(sample: Sample, output_path: Path):
-    """Fetch NAIP imagery from Planetary Computer and save as TIFF. Handles tile boundaries."""
+    """Fetch NAIP imagery from Planetary Computer and save as PNG. Handles tile boundaries."""
     client = Client.open(PC_STAC_URL)
     
     # 1. Search with a small buffer (approx 1km) to find all relevant tiles
@@ -320,7 +320,7 @@ def main():
         folder = OUTPUT_DIR / cls_name
         folder.mkdir(exist_ok=True)
         
-        filename = f"{slugify(s.primary_tag or 'unknown')}_{slugify(s.osmid)}.tiff"
+        filename = f"{slugify(s.primary_tag or 'unknown')}_{slugify(s.osmid)}.png"
         filepath = folder / filename
         
         # Simple progress
