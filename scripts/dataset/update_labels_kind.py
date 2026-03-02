@@ -10,7 +10,8 @@ import os
 import pandas as pd
 
 # Define paths simply
-BASE_DIR = '../../dataset_osm'
+FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.abspath(os.path.join(FILE_DIR, '..', '..', 'dataset_osm'))
 LABELS_FILE = os.path.join(BASE_DIR, 'labels.csv')
 TRACK_FOLDER = os.path.join(BASE_DIR, 'track')
 NOT_TRACK_FOLDER = os.path.join(BASE_DIR, 'not_track')
@@ -52,7 +53,7 @@ def update_labels():
 
     # Save the file back
     df.to_csv(LABELS_FILE, index=False)
-    print("Finished. Updated rows.")
+    print(f"Finished. Updated {count} rows.")
 
 if __name__ == '__main__':
     update_labels()

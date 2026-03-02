@@ -183,59 +183,6 @@ class ChipReviewApp:
         #    self.create_validation_test_split()
         
         self.root.destroy()
-
-#    def create_validation_test_split(self, val_ratio=0.1, test_ratio=0.1):
-#        """
-#        Final process, create validation and test folder for both track and non track images.
-#        -dataset_osm/
-#            -train/
-#                -track/
-#                -not_track/
-#            -val/
-#                -track/
-#                -not_track/
-#            -test/
-#                -track/
-#                -not_track/
-#        """
-#        os.makedirs(DATASET_DIR / "train" / "track", exist_ok=True)
-#        os.makedirs(DATASET_DIR / "train" / "not_track", exist_ok=True)
-#        os.makedirs(DATASET_DIR / "val" / "track", exist_ok=True)
-#        os.makedirs(DATASET_DIR / "val" / "not_track", exist_ok=True)
-#        os.makedirs(DATASET_DIR / "test" / "track", exist_ok=True)
-#        os.makedirs(DATASET_DIR / "test" / "not_track", exist_ok=True)
-#
-#        import random
-#
-#        for row in self.rows:
-#            if row is None:
-#                continue
-#            filepath = DATASET_DIR / row[0]
-#            label = row[1]
-#            if not filepath.exists():
-#                continue
-#            
-#            rand_val = random.random()
-#            if rand_val < test_ratio:
-#                split = "test"
-#            elif rand_val < test_ratio + val_ratio:
-#                split = "val"
-#            else:
-#                split = "train"
-#            
-#            if label == '1':
-#                dest_dir = DATASET_DIR / split / "track"
-#            else:
-#                dest_dir = DATASET_DIR / split / "not_track"
-#            
-#            # Delete original track and not_track dirs after moving files
-#            if dest_dir.parent.name == "train":
-#                # Move files from original directories to train
-#                shutil.move(filepath, dest_dir / filepath.name)
-#            else:
-#                shutil.copy(filepath, dest_dir / filepath.name)
-#        print("Created validation and test splits.")
-
         
 
 
