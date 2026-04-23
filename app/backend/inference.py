@@ -5,6 +5,7 @@ import math
 import os
 from pathlib import Path
 
+import asyncpg
 import httpx
 import numpy as np
 from dotenv import load_dotenv
@@ -16,24 +17,26 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN", "")
-MODEL_PATH = Path(__file__).resolve().parent.parent.parent / "models" / "track_model.keras"
 
-# Zoom 16 at 512px gives ~1.2km coverage per tile (radius ~0.61km).
-# Grid spacing must be < tile radius so any track always falls well inside a tile.
-# At 0.5km, worst-case diagonal offset is 0.35km — track is always near the tile center.
+_model_path_env = os.getenv("MODEL_PATH")
+MODEL_PATH = (
+    Path(_model_path_env)
+    if _model_path_env
+    else Path(__file__).resolve().parent.parent.parent / "models" / "track_model.keras"
+)
+
 ZOOM = 16
 TILE_PX = 512
 IMG_SIZE = (224, 224)
 GRID_SPACING_KM = 0.5
 CONCURRENCY = 16
 
-# Neighbour aggregation: use surrounding tile scores to validate detections
-NEIGHBOR_RADIUS_KM = 1.5   # tiles within this distance are considered neighbours
-PRELIM_SCALE      = 0.7    # lower gate = threshold * PRELIM_SCALE (e.g. 0.455 at threshold=0.65)
-OWN_WEIGHT        = 0.5    # blend weight for tile's own score
-NEIGHBOR_WEIGHT   = 0.5    # blend weight for mean neighbour score
-NEIGHBOR_FLOOR    = 0.3    # minimum score for a neighbour to contribute to the mean
-CLUSTER_RADIUS_KM = 1.2    # detections closer than this are merged into one weighted centroid
+NEIGHBOR_RADIUS_KM = 1.5
+PRELIM_SCALE      = 0.7
+OWN_WEIGHT        = 0.5
+NEIGHBOR_WEIGHT   = 0.5
+NEIGHBOR_FLOOR    = 0.3
+CLUSTER_RADIUS_KM = 1.2
 
 _model = None
 
@@ -45,6 +48,21 @@ def load_model() -> tf.keras.Model:
         _model = tf.keras.models.load_model(str(MODEL_PATH))
         print("Model loaded.")
     return _model
+
+
+def _lat_lng_to_tile(lat: float, lng: float, zoom: int = ZOOM) -> tuple[int, int, int]:
+    n = 2 ** zoom
+    x = int((lng + 180.0) / 360.0 * n)
+    lat_rad = math.radians(lat)
+    y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
+    return zoom, x, y
+
+
+def _tile_center(z: int, x: int, y: int) -> tuple[float, float]:
+    n = 2 ** z
+    lng = (x + 0.5) / n * 360.0 - 180.0
+    lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * (y + 0.5) / n)))
+    return math.degrees(lat_rad), lng
 
 
 def _grid_points(
@@ -105,8 +123,6 @@ def _aggregate_scores(
         neighbor_scores = [scores[j] for j in neighbor_map[i] if scores[j] >= NEIGHBOR_FLOOR]
         neighbor_mean = sum(neighbor_scores) / len(neighbor_scores) if neighbor_scores else 0.0
         blended = OWN_WEIGHT * score + NEIGHBOR_WEIGHT * neighbor_mean
-        # Never penalise: a score can only be boosted by neighbour support, not reduced.
-        # This preserves isolated real tracks while still lifting weak edge-of-tile detections.
         agg[i] = max(score, blended)
     return agg
 
@@ -139,95 +155,13 @@ def _cluster_detections(
     return detections
 
 
-def _validate_track_geometry(img_512: np.ndarray) -> bool:
-    """
-    Returns True if the 512×512 satellite tile contains an infield shape
-    consistent with a 400m running track.
-
-    At zoom 16, 512px tile → ~2.38 m/px (equatorial; ±~5% at lat ≤ 60°).
-
-    Infield size range covers standard (IAAF) through wider non-standard tracks:
-        Standard track:    long ≈  66 px (157 m),  short ≈ 31 px ( 73 m), aspect ~2.1
-        Wide-curve track:  long ≈  84 px (200 m),  short ≈ 50 px (120 m), aspect ~1.7
-        Filter bounds:     long  25–95 px,          short 18–58 px,        aspect 1.2–2.5
-
-    Strategy: detect the green infield blob, validate its size/shape, then
-    confirm the surrounding ring is non-green (track surface, not more grass).
-    """
-    from scipy.ndimage import label, binary_erosion, binary_dilation
-
-    img_f = img_512.astype(np.float32) / 255.0
-    r, g, b = img_f[:, :, 0], img_f[:, :, 1], img_f[:, :, 2]
-
-    # Green-infield mask: green channel clearly dominates red and blue.
-    green_mask = (g > r * 1.08) & (g > b * 1.08) & (g > 0.12)
-
-    # Morphological clean-up: remove isolated noise pixels.
-    green_mask = binary_erosion(green_mask, iterations=2)
-    green_mask = binary_dilation(green_mask, iterations=3)
-
-    labeled, n_components = label(green_mask)
-    if n_components == 0:
-        return False
-
-    for comp_id in range(1, n_components + 1):
-        comp = labeled == comp_id
-        area = int(comp.sum())
-
-        # Area in pixels must be consistent with a 400m track infield.
-        if not (250 <= area <= 12_000):
-            continue
-
-        rows_idx = np.where(comp.any(axis=1))[0]
-        cols_idx = np.where(comp.any(axis=0))[0]
-        h = int(rows_idx[-1] - rows_idx[0] + 1)
-        w = int(cols_idx[-1] - cols_idx[0] + 1)
-        long_px = max(h, w)
-        short_px = min(h, w)
-
-        # Bounding-box size check — covers standard through wide-curve tracks.
-        if not (25 <= long_px <= 95):
-            continue
-        if not (18 <= short_px <= 58):
-            continue
-
-        # Aspect ratio: standard ~2.1, wide-curve ~1.7; allow generous slack.
-        aspect = long_px / short_px
-        if not (1.2 <= aspect <= 2.5):
-            continue
-
-        # Fill ratio: an oval/stadium blob scores ~0.65–0.90.
-        # A plain rectangular grass field scores ~0.95+, rejecting football pitches etc.
-        fill_ratio = area / (h * w)
-        if not (0.55 <= fill_ratio <= 0.93):
-            continue
-
-        # Confirm the ring surrounding the infield is non-green (track surface).
-        # Dilate outward by ~6 px (~14 m, about 1.5 lane-widths) to sample the ring.
-        ring_outer = binary_dilation(comp, iterations=6)
-        ring_mask = ring_outer & ~comp
-        ring_pixels = img_f[ring_mask]
-        if ring_pixels.shape[0] < 50:
-            continue
-
-        ring_r_mean = float(ring_pixels[:, 0].mean())
-        ring_g_mean = float(ring_pixels[:, 1].mean())
-        # If the ring is also green, this is likely a large grass area, not a track.
-        if ring_g_mean > ring_r_mean * 0.98:
-            continue
-
-        return True
-
-    return False
-
-
 async def _fetch_tile(
     client: httpx.AsyncClient,
     sem: asyncio.Semaphore,
     lat: float,
     lng: float,
-) -> tuple[np.ndarray, np.ndarray] | None:
-    """Returns (img_224, img_512) or None on failure."""
+) -> np.ndarray | None:
+    """Returns a 224×224 image array or None on failure."""
     url = (
         f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static/"
         f"{lng:.6f},{lat:.6f},{ZOOM}/{TILE_PX}x{TILE_PX}"
@@ -239,22 +173,14 @@ async def _fetch_tile(
             if resp.status_code != 200:
                 logger.warning(
                     "Mapbox tile fetch failed: HTTP %d | lat=%.4f lng=%.4f | body: %s",
-                    resp.status_code,
-                    lat,
-                    lng,
-                    resp.text[:200],
+                    resp.status_code, lat, lng, resp.text[:200],
                 )
                 return None
             img_orig = Image.open(io.BytesIO(resp.content)).convert("RGB")
-            img_512 = np.array(
-                img_orig.resize((TILE_PX, TILE_PX), Image.Resampling.LANCZOS),
-                dtype=np.float32,
-            )
-            img_224 = np.array(
+            return np.array(
                 img_orig.resize(IMG_SIZE, Image.Resampling.LANCZOS),
                 dtype=np.float32,
             )
-            return img_224, img_512
         except Exception as exc:
             logger.warning("Tile fetch exception lat=%.4f lng=%.4f: %s", lat, lng, exc)
             return None
@@ -265,41 +191,101 @@ async def scan_area(
     lng: float,
     radius_km: float,
     threshold: float = 0.65,
+    db_pool: asyncpg.Pool | None = None,
 ) -> dict:
+    import db as _db
+
     points = _grid_points(lat, lng, radius_km)
     model = load_model()
     sem = asyncio.Semaphore(CONCURRENCY)
 
+    # Normalise grid points to canonical slippy-map tile keys and deduplicate.
+    tile_map: dict[tuple[int, int, int], tuple[float, float]] = {}
+    for pt in points:
+        zxy = _lat_lng_to_tile(pt[0], pt[1])
+        if zxy not in tile_map:
+            tile_map[zxy] = _tile_center(*zxy)
+
+    unique_tiles = list(tile_map.items())  # [(z,x,y), (tile_lat, tile_lng)]
+
+    # --- Cache lookup ---
+    cache_hits: dict[tuple[int, int, int], dict] = {}
+    if db_pool is not None:
+        cache_hits = await _db.get_cached_tiles(db_pool, [k for k, _ in unique_tiles])
+
+    tiles_to_fetch = [(zxy, coords) for zxy, coords in unique_tiles if zxy not in cache_hits]
+
+    # --- Fetch only uncached tiles ---
     async with httpx.AsyncClient() as client:
-        tasks = [_fetch_tile(client, sem, p[0], p[1]) for p in points]
-        images = await asyncio.gather(*tasks)
+        tasks = [_fetch_tile(client, sem, coords[0], coords[1]) for _, coords in tiles_to_fetch]
+        fetched_images = await asyncio.gather(*tasks)
+
+    # --- ML inference on fetched tiles ---
+    valid_fetched: list[tuple[tuple[int, int, int], tuple[float, float], np.ndarray]] = []
+    for (zxy, coords), img in zip(tiles_to_fetch, fetched_images):
+        if img is not None:
+            valid_fetched.append((zxy, coords, img))
+
+    preds_fetched = np.array([], dtype=np.float32)
+    if valid_fetched:
+        batch = np.stack([entry[2] for entry in valid_fetched])
+        preds_fetched = model.predict(batch, batch_size=16, verbose=0).flatten()
+
+    # --- Persist new tile results to cache ---
+    new_cache_entries: list[dict] = []
+    for idx, (zxy, coords, _) in enumerate(valid_fetched):
+        new_cache_entries.append({
+            "z": zxy[0], "x": zxy[1], "y": zxy[2],
+            "tile_lat": coords[0], "tile_lng": coords[1],
+            "ml_score": float(preds_fetched[idx]),
+        })
+
+    if db_pool is not None and new_cache_entries:
+        await _db.upsert_tiles(db_pool, new_cache_entries)
+
+    # --- Merge cache hits + live results into unified scored list ---
+    fetched_by_zxy: dict[tuple[int, int, int], float] = {
+        zxy: float(preds_fetched[idx]) for idx, (zxy, _, _) in enumerate(valid_fetched)
+    }
 
     valid_points: list[tuple[float, float]] = []
-    valid_imgs_224: list[np.ndarray] = []
-    valid_imgs_512: list[np.ndarray] = []
-    for pt, img in zip(points, images):
-        if img is not None:
-            valid_points.append(pt)
-            valid_imgs_224.append(img[0])
-            valid_imgs_512.append(img[1])
+    scores_list: list[float] = []
 
-    if not valid_imgs_224:
-        return {"detections": [], "tiles_scanned": 0}
+    for zxy, coords in unique_tiles:
+        if zxy in cache_hits:
+            valid_points.append(coords)
+            scores_list.append(cache_hits[zxy]["ml_score"])
+        elif zxy in fetched_by_zxy:
+            valid_points.append(coords)
+            scores_list.append(fetched_by_zxy[zxy])
 
-    batch = np.stack(valid_imgs_224)
-    preds = model.predict(batch, batch_size=16, verbose=0).flatten()
+    if not valid_points:
+        return {"detections": [], "tiles_scanned": 0, "tiles_from_cache": 0, "tiles_fetched_live": 0}
 
+    preds = np.array(scores_list, dtype=np.float32)
     neighbor_map = _build_neighbor_map(valid_points, NEIGHBOR_RADIUS_KM)
     prelim = threshold * PRELIM_SCALE
     agg_scores = _aggregate_scores(preds, neighbor_map, prelim)
 
     candidates = [
-        (plat, plng, float(agg_scores[i]))
-        for i, (plat, plng) in enumerate(valid_points)
-        if preds[i] >= prelim and _validate_track_geometry(valid_imgs_512[i])
+        (valid_points[i][0], valid_points[i][1], float(agg_scores[i]))
+        for i in range(len(valid_points))
+        if preds[i] >= prelim
     ]
 
     detections = _cluster_detections(candidates, CLUSTER_RADIUS_KM)
     detections = [d for d in detections if d["confidence"] >= threshold]
     detections.sort(key=lambda x: x["confidence"], reverse=True)
-    return {"detections": detections, "tiles_scanned": len(valid_imgs_224)}
+
+    # --- Persist clustered detections ---
+    if db_pool is not None:
+        for d in detections:
+            track_id = await _db.upsert_detected_track(db_pool, d["lat"], d["lng"], d["confidence"])
+            d["track_id"] = track_id
+
+    return {
+        "detections": detections,
+        "tiles_scanned": len(valid_points),
+        "tiles_from_cache": len(cache_hits),
+        "tiles_fetched_live": len(valid_fetched),
+    }
