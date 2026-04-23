@@ -214,10 +214,93 @@ body {
   line-height: 1.6;
 }
 
+/* ── Map mode hints ────────────────────────────────────── */
+.map-hint {
+  font-size: 12px;
+  color: #666;
+  line-height: 1.6;
+}
+
+.map-hint.secondary {
+  color: #444;
+  font-size: 11px;
+}
+
+/* ── Pick button ───────────────────────────────────────── */
+.pick-btn {
+  width: 100%;
+  padding: 5px 7px;
+  background: transparent;
+  border: 1px solid #333;
+  color: #666;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.pick-btn:hover,
+.pick-btn.active {
+  border-color: #5b8af5;
+  color: #5b8af5;
+}
+
+/* ── Center display ────────────────────────────────────── */
+.center-display {
+  font-size: 11px;
+  color: #555;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── Map container ─────────────────────────────────────── */
 .map-container {
   flex: 1;
   position: relative;
+}
+
+.map-container.picking {
+  cursor: crosshair;
+}
+
+/* ── Pick banner ───────────────────────────────────────── */
+.pick-banner {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(10, 21, 32, 0.92);
+  color: #5b8af5;
+  padding: 8px 14px 8px 16px;
+  font-size: 13px;
+  z-index: 10;
+  border: 1px solid rgba(91, 138, 245, 0.4);
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pick-cancel {
+  background: none;
+  border: none;
+  color: #5b8af5;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.pick-cancel:hover {
+  opacity: 1;
+}
+
+/* ── Popup coords ──────────────────────────────────────── */
+.popup-coords {
+  font-size: 10px;
+  color: #555;
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── Scanning badge ────────────────────────────────────── */
@@ -242,6 +325,157 @@ body {
   border: 1px solid rgba(0, 196, 140, 0.3);
   white-space: nowrap;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+/* ── Header tabs ───────────────────────────────────────── */
+.header-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mode-tabs {
+  display: flex;
+  border: 1px solid #333;
+  flex-shrink: 0;
+}
+
+.mode-tab {
+  padding: 3px 8px;
+  font-family: inherit;
+  font-size: 11px;
+  background: transparent;
+  color: #555;
+  border: none;
+  cursor: pointer;
+}
+
+.mode-tab.active {
+  background: #1c1c1c;
+  color: #ccc;
+}
+
+.mode-tab:hover:not(.active) {
+  color: #888;
+}
+
+/* ── Section label ─────────────────────────────────────── */
+.section-label {
+  font-size: 11px;
+  color: #555;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.refresh-btn {
+  background: none;
+  border: none;
+  color: #555;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.refresh-btn:hover {
+  color: #aaa;
+}
+
+/* ── Manual add form ───────────────────────────────────── */
+.manual-form {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.form-row {
+  display: flex;
+  gap: 5px;
+}
+
+.form-input {
+  width: 100%;
+  padding: 5px 7px;
+  background: #1c1c1c;
+  border: 1px solid #333;
+  color: #ddd;
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.form-input:focus {
+  border-color: #666;
+}
+
+.form-input::placeholder {
+  color: #444;
+}
+
+/* ── Pending track items ───────────────────────────────── */
+.pending-item {
+  padding: 6px 6px 5px;
+  border: 1px solid #2a2a2a;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.track-name {
+  font-size: 12px;
+  color: #ccc;
+}
+
+.track-meta {
+  font-size: 11px;
+  color: #555;
+}
+
+.pending-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 3px;
+}
+
+.action-btn {
+  flex: 1;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 11px;
+  border: 1px solid;
+  cursor: pointer;
+  background: transparent;
+}
+
+.action-btn.verify {
+  color: #00c48c;
+  border-color: #00c48c44;
+}
+
+.action-btn.verify:hover {
+  background: #00c48c22;
+}
+
+.action-btn.reject {
+  color: #e05252;
+  border-color: #e0525244;
+}
+
+.action-btn.reject:hover {
+  background: #e0525222;
+}
+
+/* ── Verified track marker ─────────────────────────────── */
+.verified-marker {
+  width: 14px;
+  height: 14px;
+  background: #5b8af5;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+  transition: transform 0.15s;
 }
 
 /* ── Popup ─────────────────────────────────────────────── */
@@ -276,5 +510,69 @@ body {
 }
 
 .popup-link:hover {
+  color: #00c48c;
+}
+
+.popup-verified-badge {
+  font-size: 13px;
+  font-weight: bold;
+  color: #5b8af5;
+  line-height: 1;
+}
+
+.popup-track-name {
+  font-size: 14px;
+  color: #ddd;
+  margin-top: 4px;
+}
+
+.popup-actions {
+  display: flex;
+  gap: 4px;
+  margin: 6px 0 2px;
+}
+
+.submit-link {
+  display: block;
+  margin: 6px 0 2px;
+  background: none;
+  border: none;
+  color: #666;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.submit-link:hover {
+  color: #aaa;
+}
+
+.submit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 2px;
+}
+
+.popup-input {
+  width: 100%;
+  padding: 4px 6px;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  color: #ddd;
+  font-family: inherit;
+  font-size: 11px;
+  outline: none;
+}
+
+.popup-input::placeholder {
+  color: #444;
+}
+
+.submit-done {
+  margin: 6px 0 2px;
+  font-size: 11px;
   color: #00c48c;
 }
