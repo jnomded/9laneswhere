@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4-alpine
+    environment:
+      POSTGRES_USER: track
+      POSTGRES_PASSWORD: track
+      POSTGRES_DB: trackdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./app/backend/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U track -d trackdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  backend:
+    build:
+      context: ./app/backend
+      dockerfile: Dockerfile
+    env_file: ./app/backend/.env
+    environment:
+      - DATABASE_URL=postgresql://track:track@db:5432/trackdb
+      - MODEL_PATH=/models/track_model.keras
+    volumes:
+      - ./models:/models:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
