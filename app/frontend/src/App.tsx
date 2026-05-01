@@ -396,9 +396,7 @@ export default function App() {
                   ? `${verifiedTracks.length} verified track${verifiedTracks.length !== 1 ? 's' : ''} on the map.`
                   : 'No verified tracks yet.'}
               </p>
-              <p className="map-hint secondary">
-                Know a track that's missing? Click anywhere on the map to submit its location for review.
-              </p>
+              
             </>
           )}
         </div>
