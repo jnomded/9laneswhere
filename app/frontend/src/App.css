@@ -576,3 +576,56 @@ body {
   font-size: 11px;
   color: #00c48c;
 }
+
+/* ── Sidebar footer (passkey / admin status) ───────────── */
+.sidebar-footer {
+  border-top: 1px solid #1e1e1e;
+  padding: 8px 12px;
+  flex-shrink: 0;
+}
+
+.passkey-entry {
+  display: flex;
+}
+
+.passkey-input {
+  width: 100%;
+  padding: 5px 7px;
+  background: #0d0d0d;
+  border: 1px solid #1e1e1e;
+  color: #333;
+  font-family: inherit;
+  font-size: 11px;
+  outline: none;
+}
+
+.passkey-input:focus {
+  border-color: #2a2a2a;
+  color: #555;
+}
+
+.passkey-input::placeholder {
+  color: #222;
+}
+
+.admin-unlocked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #444;
+}
+
+.lock-btn {
+  background: none;
+  border: none;
+  color: #333;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.lock-btn:hover {
+  color: #888;
+}

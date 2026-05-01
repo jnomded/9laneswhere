@@ -13,6 +13,7 @@ import type { Detection, GeocodingFeature, ScanResult, Track } from './types'
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string
 const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:8000'
+const ADMIN_PASSKEY = import.meta.env.VITE_ADMIN_PASSKEY as string
 
 function circleGeoJSON(lat: number, lng: number, radiusKm: number, steps = 64) {
   const R = 6371
@@ -46,7 +47,9 @@ export default function App() {
     zoom: 4,
   })
 
-  // Admin mode
+  // Admin access
+  const [adminUnlocked, setAdminUnlocked] = useState(false)
+  const [passkeyInput, setPasskeyInput] = useState('')
   const [adminMode, setAdminMode] = useState(false)
 
   // Pick mode: which field is waiting for a map click
@@ -72,12 +75,6 @@ export default function App() {
   const [manualLng, setManualLng] = useState('')
   const [manualName, setManualName] = useState('')
   const [manualBy, setManualBy] = useState('')
-
-  // User submit flow (map click in user mode)
-  const [userClickLoc, setUserClickLoc] = useState<{ lat: number; lng: number } | null>(null)
-  const [userSubmitName, setUserSubmitName] = useState('')
-  const [userSubmitBy, setUserSubmitBy] = useState('')
-  const [userSubmitDone, setUserSubmitDone] = useState(false)
 
   useEffect(() => {
     loadVerifiedTracks()
@@ -138,23 +135,6 @@ export default function App() {
     } catch {}
   }
 
-  const handleUserSubmit = async () => {
-    if (!userClickLoc) return
-    try {
-      await fetch(`${API_URL}/tracks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          lat: userClickLoc.lat,
-          lng: userClickLoc.lng,
-          name: userSubmitName || null,
-          submitted_by: userSubmitBy || null,
-        }),
-      })
-      setUserSubmitDone(true)
-    } catch {}
-  }
-
   const handleMapClick = useCallback(
     (e: MapLayerMouseEvent) => {
       const { lng, lat } = e.lngLat
@@ -175,16 +155,8 @@ export default function App() {
 
       setSelectedMarker(null)
       setSelectedVerified(null)
-
-      if (!adminMode) {
-        // User mode: clicking the map opens a submit popup
-        setUserClickLoc({ lat, lng })
-        setUserSubmitName('')
-        setUserSubmitBy('')
-        setUserSubmitDone(false)
-      }
     },
-    [pickMode, adminMode]
+    [pickMode]
   )
 
   const fetchSuggestions = useCallback((query: string) => {
@@ -210,6 +182,15 @@ export default function App() {
     setResult(null)
     setSelectedMarker(null)
     mapRef.current?.flyTo({ center: [lng, lat], zoom: 12, duration: 1500 })
+  }
+
+  const handlePasskey = () => {
+    if (passkeyInput === ADMIN_PASSKEY) {
+      setAdminUnlocked(true)
+      setPasskeyInput('')
+    } else {
+      setPasskeyInput('')
+    }
   }
 
   const handleScan = async () => {
@@ -251,9 +232,11 @@ export default function App() {
               <button className={`mode-tab${!adminMode ? ' active' : ''}`} onClick={() => setAdminMode(false)}>
                 Map
               </button>
-              <button className={`mode-tab${adminMode ? ' active' : ''}`} onClick={() => setAdminMode(true)}>
-                Admin
-              </button>
+              {adminUnlocked && (
+                <button className={`mode-tab${adminMode ? ' active' : ''}`} onClick={() => setAdminMode(true)}>
+                  Admin
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -419,6 +402,29 @@ export default function App() {
             </>
           )}
         </div>
+
+        {/* ── Sidebar footer (admin passkey) ────────── */}
+        <div className="sidebar-footer">
+          {adminUnlocked ? (
+            <div className="admin-unlocked">
+              <span>Admin access active</span>
+              <button className="lock-btn" onClick={() => { setAdminUnlocked(false); setAdminMode(false) }}>
+                Lock
+              </button>
+            </div>
+          ) : (
+            <div className="passkey-entry">
+              <input
+                className="passkey-input"
+                type="password"
+                placeholder="Admin passkey"
+                value={passkeyInput}
+                onChange={(e) => setPasskeyInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handlePasskey()}
+              />
+            </div>
+          )}
+        </div>
       </aside>
 
       {/* ── Map ─────────────────────────────────────── */}
@@ -520,35 +526,6 @@ export default function App() {
             </Popup>
           )}
 
-          {/* User submit popup (map click in user mode) */}
-          {!adminMode && userClickLoc && (
-            <Popup longitude={userClickLoc.lng} latitude={userClickLoc.lat}
-              anchor="bottom" offset={14}
-              onClose={() => { setUserClickLoc(null); setUserSubmitDone(false) }}
-              closeButton>
-              <div className="popup-content">
-                {userSubmitDone ? (
-                  <div className="submit-done">✓ Submitted for review</div>
-                ) : (
-                  <>
-                    <div className="popup-subtitle" style={{ marginBottom: 6 }}>
-                      Submit track here?
-                    </div>
-                    <div className="submit-form">
-                      <input className="popup-input" placeholder="Track name (optional)"
-                        value={userSubmitName} onChange={(e) => setUserSubmitName(e.target.value)} />
-                      <input className="popup-input" placeholder="Your name"
-                        value={userSubmitBy} onChange={(e) => setUserSubmitBy(e.target.value)} />
-                      <button className="action-btn verify" onClick={handleUserSubmit}>Submit</button>
-                    </div>
-                  </>
-                )}
-                <div className="popup-coords">
-                  {userClickLoc.lat.toFixed(5)}°, {userClickLoc.lng.toFixed(5)}°
-                </div>
-              </div>
-            </Popup>
-          )}
         </Map>
 
         {/* Pick mode banner */}
