@@ -13,7 +13,6 @@ import type { Detection, GeocodingFeature, ScanResult, Track } from './types'
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string
 const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:8000'
-const ADMIN_PASSKEY = import.meta.env.VITE_ADMIN_PASSKEY as string
 
 function circleGeoJSON(lat: number, lng: number, radiusKm: number, steps = 64) {
   const R = 6371
@@ -48,9 +47,18 @@ export default function App() {
   })
 
   // Admin access
-  const [adminUnlocked, setAdminUnlocked] = useState(false)
+  const [adminToken, setAdminToken] = useState<string | null>(
+    () => sessionStorage.getItem('admin_token')
+  )
+  const adminUnlocked = adminToken !== null
   const [passkeyInput, setPasskeyInput] = useState('')
   const [adminMode, setAdminMode] = useState(false)
+
+  // Per-pin coordinate overrides while admin is dragging.
+  const [draggedPositions, setDraggedPositions] = useState<
+    Record<number, { lat: number; lng: number }>
+  >({})
+  const [selectedPending, setSelectedPending] = useState<Track | null>(null)
 
   // Pick mode: which field is waiting for a map click
   const [pickMode, setPickMode] = useState<'scan-center' | 'add-track' | null>(null)
@@ -99,20 +107,32 @@ export default function App() {
 
   const loadPendingTracks = async () => {
     try {
-      const res = await fetch(`${API_URL}/tracks?status=pending&min_confidence=0`)
+      const res = await authedFetch(`${API_URL}/tracks?status=pending&min_confidence=0`)
       if (res.ok) setPendingTracks((await res.json()).tracks)
     } catch {}
   }
 
   const handleVerifyTrack = async (id: number, status: 'verified' | 'rejected') => {
     try {
-      await fetch(`${API_URL}/tracks/${id}/status`, {
+      const body: Record<string, unknown> = { status, verified_by: 'admin' }
+      const dragged = draggedPositions[id]
+      if (status === 'verified' && dragged) {
+        body.lat = dragged.lat
+        body.lng = dragged.lng
+      }
+      await authedFetch(`${API_URL}/tracks/${id}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status, verified_by: 'admin' }),
+        body: JSON.stringify(body),
       })
       setSelectedMarker(null)
       setSelectedVerified(null)
+      setSelectedPending(null)
+      setDraggedPositions((prev) => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
       await Promise.all([loadPendingTracks(), loadVerifiedTracks()])
     } catch {}
   }
@@ -122,7 +142,7 @@ export default function App() {
     const lng = parseFloat(manualLng)
     if (isNaN(lat) || isNaN(lng)) return
     try {
-      await fetch(`${API_URL}/tracks`, {
+      await authedFetch(`${API_URL}/tracks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ lat, lng, name: manualName || null, submitted_by: manualBy || null }),
@@ -155,6 +175,7 @@ export default function App() {
 
       setSelectedMarker(null)
       setSelectedVerified(null)
+      setSelectedPending(null)
     },
     [pickMode]
   )
@@ -184,13 +205,42 @@ export default function App() {
     mapRef.current?.flyTo({ center: [lng, lat], zoom: 12, duration: 1500 })
   }
 
-  const handlePasskey = () => {
-    if (passkeyInput === ADMIN_PASSKEY) {
-      setAdminUnlocked(true)
-      setPasskeyInput('')
-    } else {
-      setPasskeyInput('')
+  const handlePasskey = async () => {
+    if (!passkeyInput) return
+    try {
+      const res = await fetch(`${API_URL}/admin/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: passkeyInput }),
+      })
+      if (res.ok) {
+        sessionStorage.setItem('admin_token', passkeyInput)
+        setAdminToken(passkeyInput)
+      }
+    } catch { /* network error — treat as invalid */ }
+    setPasskeyInput('')
+  }
+
+  const lockAdmin = () => {
+    sessionStorage.removeItem('admin_token')
+    setAdminToken(null)
+    setAdminMode(false)
+    setDraggedPositions({})
+    setSelectedPending(null)
+  }
+
+  const authedFetch = async (url: string, options: RequestInit = {}) => {
+    const headers: Record<string, string> = {
+      ...(options.headers as Record<string, string> | undefined),
     }
+    if (adminToken) headers['X-Admin-Token'] = adminToken
+    const res = await fetch(url, { ...options, headers })
+    if (res.status === 401) {
+      sessionStorage.removeItem('admin_token')
+      setAdminToken(null)
+      setAdminMode(false)
+    }
+    return res
   }
 
   const handleScan = async () => {
@@ -199,7 +249,7 @@ export default function App() {
     setResult(null)
     setSelectedMarker(null)
     try {
-      const res = await fetch(`${API_URL}/scan`, {
+      const res = await authedFetch(`${API_URL}/scan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ lat: center.lat, lng: center.lng, radius_km: radiusKm, threshold: threshold / 100 }),
@@ -370,7 +420,13 @@ export default function App() {
                   {pendingTracks.map((t) => (
                     <div key={t.id} className="pending-item">
                       <div className="result-coords" style={{ cursor: 'pointer' }}
-                        onClick={() => mapRef.current?.flyTo({ center: [t.lng, t.lat], zoom: 15, duration: 800 })}>
+                        onClick={() => {
+                          const pos = draggedPositions[t.id] ?? { lat: t.lat, lng: t.lng }
+                          setSelectedPending(t)
+                          setSelectedMarker(null)
+                          setSelectedVerified(null)
+                          mapRef.current?.flyTo({ center: [pos.lng, pos.lat], zoom: 17, duration: 800 })
+                        }}>
                         {t.lat.toFixed(4)}°, {t.lng.toFixed(4)}°
                       </div>
                       {t.name && <div className="track-name">{t.name}</div>}
@@ -406,7 +462,7 @@ export default function App() {
           {adminUnlocked ? (
             <div className="admin-unlocked">
               <span>Admin access active</span>
-              <button className="lock-btn" onClick={() => { setAdminUnlocked(false); setAdminMode(false) }}>
+              <button className="lock-btn" onClick={lockAdmin}>
                 Lock
               </button>
             </div>
@@ -458,47 +514,146 @@ export default function App() {
             </Marker>
           ))}
 
-          {/* Detection markers (admin scan results) */}
-          {result?.detections.map((d, i) => (
-            <Marker key={i} longitude={d.lng} latitude={d.lat} anchor="center">
-              <div
-                style={{
-                  width: 18, height: 18, borderRadius: '50%',
-                  background: confidenceColor(d.confidence),
-                  border: '2.5px solid rgba(255,255,255,0.9)',
-                  cursor: 'pointer',
-                  boxShadow: '0 2px 8px rgba(0,0,0,0.6)',
-                  transform: selectedMarker === d ? 'scale(1.3)' : 'scale(1)',
-                  transition: 'transform 0.15s',
+          {/* Pending track markers (admin mode) — draggable to refine before verify */}
+          {adminMode && pendingTracks
+            .filter((t) => !result?.detections.some((d) => d.track_id === t.id))
+            .map((t) => {
+              const pos = draggedPositions[t.id] ?? { lat: t.lat, lng: t.lng }
+              return (
+                <Marker
+                  key={`p-${t.id}`}
+                  longitude={pos.lng}
+                  latitude={pos.lat}
+                  anchor="center"
+                  draggable
+                  onDragEnd={(e) =>
+                    setDraggedPositions((prev) => ({
+                      ...prev,
+                      [t.id]: { lat: e.lngLat.lat, lng: e.lngLat.lng },
+                    }))
+                  }
+                >
+                  <div
+                    style={{
+                      width: 16, height: 16, borderRadius: '50%',
+                      background: '#f5a623',
+                      border: '2.5px solid rgba(255,255,255,0.9)',
+                      cursor: 'grab',
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.6)',
+                      transform: selectedPending?.id === t.id ? 'scale(1.3)' : 'scale(1)',
+                      transition: 'transform 0.15s',
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setSelectedPending(t)
+                      setSelectedMarker(null)
+                      setSelectedVerified(null)
+                    }}
+                  />
+                </Marker>
+              )
+            })}
+
+          {/* Detection markers (admin scan results) — draggable in admin mode */}
+          {result?.detections.map((d, i) => {
+            const pos =
+              adminMode && d.track_id != null && draggedPositions[d.track_id]
+                ? draggedPositions[d.track_id]
+                : { lat: d.lat, lng: d.lng }
+            return (
+              <Marker
+                key={i}
+                longitude={pos.lng}
+                latitude={pos.lat}
+                anchor="center"
+                draggable={adminMode && d.track_id != null}
+                onDragEnd={(e) => {
+                  if (d.track_id != null) {
+                    setDraggedPositions((prev) => ({
+                      ...prev,
+                      [d.track_id!]: { lat: e.lngLat.lat, lng: e.lngLat.lng },
+                    }))
+                  }
                 }}
-                onClick={(e) => { e.stopPropagation(); setSelectedMarker(d); setSelectedVerified(null) }}
-              />
-            </Marker>
-          ))}
+              >
+                <div
+                  style={{
+                    width: 18, height: 18, borderRadius: '50%',
+                    background: confidenceColor(d.confidence),
+                    border: '2.5px solid rgba(255,255,255,0.9)',
+                    cursor: adminMode && d.track_id != null ? 'grab' : 'pointer',
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.6)',
+                    transform: selectedMarker === d ? 'scale(1.3)' : 'scale(1)',
+                    transition: 'transform 0.15s',
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setSelectedMarker(d)
+                    setSelectedVerified(null)
+                    setSelectedPending(null)
+                  }}
+                />
+              </Marker>
+            )
+          })}
 
           {/* Detection popup (admin: verify / reject) */}
-          {selectedMarker && (
-            <Popup longitude={selectedMarker.lng} latitude={selectedMarker.lat}
-              anchor="bottom" offset={14} onClose={() => setSelectedMarker(null)} closeButton>
-              <div className="popup-content">
-                <div className={`popup-confidence${selectedMarker.confidence < 0.85 ? ' medium' : ''}`}>
-                  {Math.round(selectedMarker.confidence * 100)}% confident
-                </div>
-                <div className="popup-subtitle">Running track detected</div>
-                {selectedMarker.track_id != null && (
-                  <div className="popup-actions">
-                    <button className="action-btn verify" onClick={() => handleVerifyTrack(selectedMarker.track_id!, 'verified')}>✓ Verify</button>
-                    <button className="action-btn reject" onClick={() => handleVerifyTrack(selectedMarker.track_id!, 'rejected')}>✗ Reject</button>
+          {selectedMarker && (() => {
+            const pos =
+              adminMode && selectedMarker.track_id != null && draggedPositions[selectedMarker.track_id]
+                ? draggedPositions[selectedMarker.track_id]
+                : { lat: selectedMarker.lat, lng: selectedMarker.lng }
+            return (
+              <Popup longitude={pos.lng} latitude={pos.lat}
+                anchor="bottom" offset={14} onClose={() => setSelectedMarker(null)} closeButton>
+                <div className="popup-content">
+                  <div className={`popup-confidence${selectedMarker.confidence < 0.85 ? ' medium' : ''}`}>
+                    {Math.round(selectedMarker.confidence * 100)}% confident
                   </div>
-                )}
-                <a className="popup-link"
-                  href={`https://www.google.com/maps/@${selectedMarker.lat},${selectedMarker.lng},18z`}
-                  target="_blank" rel="noopener noreferrer">
-                  Open in Google Maps ↗
-                </a>
-              </div>
-            </Popup>
-          )}
+                  <div className="popup-subtitle">Running track detected</div>
+                  {adminMode && selectedMarker.track_id != null && (
+                    <div className="popup-hint">Drag the pin onto the actual track before verifying.</div>
+                  )}
+                  {selectedMarker.track_id != null && (
+                    <div className="popup-actions">
+                      <button className="action-btn verify" onClick={() => handleVerifyTrack(selectedMarker.track_id!, 'verified')}>✓ Verify</button>
+                      <button className="action-btn reject" onClick={() => handleVerifyTrack(selectedMarker.track_id!, 'rejected')}>✗ Reject</button>
+                    </div>
+                  )}
+                  <a className="popup-link"
+                    href={`https://www.google.com/maps/@${pos.lat},${pos.lng},18z`}
+                    target="_blank" rel="noopener noreferrer">
+                    Open in Google Maps ↗
+                  </a>
+                </div>
+              </Popup>
+            )
+          })()}
+
+          {/* Pending track popup (admin only) */}
+          {selectedPending && adminMode && (() => {
+            const pos = draggedPositions[selectedPending.id] ?? { lat: selectedPending.lat, lng: selectedPending.lng }
+            return (
+              <Popup longitude={pos.lng} latitude={pos.lat}
+                anchor="bottom" offset={14} onClose={() => setSelectedPending(null)} closeButton>
+                <div className="popup-content">
+                  <div className="popup-pending-badge">⏳ Pending verification</div>
+                  {selectedPending.name && <div className="popup-track-name">{selectedPending.name}</div>}
+                  <div className="popup-subtitle">{pos.lat.toFixed(4)}°, {pos.lng.toFixed(4)}°</div>
+                  <div className="popup-hint">Drag the pin onto the actual track before verifying.</div>
+                  <div className="popup-actions">
+                    <button className="action-btn verify" onClick={() => handleVerifyTrack(selectedPending.id, 'verified')}>✓ Verify</button>
+                    <button className="action-btn reject" onClick={() => handleVerifyTrack(selectedPending.id, 'rejected')}>✗ Reject</button>
+                  </div>
+                  <a className="popup-link"
+                    href={`https://www.google.com/maps/@${pos.lat},${pos.lng},18z`}
+                    target="_blank" rel="noopener noreferrer">
+                    Open in Google Maps ↗
+                  </a>
+                </div>
+              </Popup>
+            )
+          })()}
 
           {/* Verified track popup */}
           {selectedVerified && (

@@ -520,6 +520,20 @@ body {
   line-height: 1;
 }
 
+.popup-pending-badge {
+  font-size: 13px;
+  font-weight: bold;
+  color: #f5a623;
+  line-height: 1;
+}
+
+.popup-hint {
+  font-size: 11px;
+  color: #aaa;
+  font-style: italic;
+  margin-top: 2px;
+}
+
 .popup-track-name {
   font-size: 14px;
   color: #ddd;

@@ -47,14 +47,16 @@ MAPBOX_TOKEN=your_mapbox_token_here
 DATABASE_URL=postgresql://your_db_user:your_db_password@localhost:5432/trackdb
 ALLOWED_ORIGIN=http://localhost:5173
 MODEL_PATH=/app/track_model.keras
+ADMIN_TOKEN=generate_a_long_random_string_here
 ```
 
 `app/frontend/.env`:
 ```
 VITE_MAPBOX_TOKEN=your_mapbox_token_here
 VITE_API_URL=http://localhost:8000
-VITE_ADMIN_PASSKEY=your_admin_passkey_here
 ```
+
+The admin passkey now lives only on the backend (`ADMIN_TOKEN`). The frontend prompts for it at runtime and stores it in `sessionStorage`; it is never bundled into the deployed JS. Generate one with `openssl rand -hex 32` or similar.
 
 You need a Mapbox account to get a token (free tier works plenty).
 
@@ -98,14 +100,17 @@ docker-compose.yml
 
 ## API endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check |
-| POST | `/scan` | Run ML scan over an area (lat, lng, radius_km, threshold) |
-| GET | `/tracks` | List tracks, filterable by bounding box, status, confidence |
-| POST | `/tracks` | Submit a track manually |
-| GET | `/tracks/{id}` | Get a single track |
-| PATCH | `/tracks/{id}/status` | Set status to verified or rejected |
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/health` | public | Health check |
+| POST | `/admin/login` | public | Validate an admin token; returns 200 on success |
+| POST | `/scan` | admin | Run ML scan over an area (lat, lng, radius_km, threshold) |
+| GET | `/tracks` | public (`status=verified`) / admin (other) | List tracks, filterable by bounding box, status, confidence |
+| POST | `/tracks` | admin | Submit a track manually |
+| GET | `/tracks/{id}` | public | Get a single track |
+| PATCH | `/tracks/{id}/status` | admin | Set status to verified or rejected; optional `lat`/`lng` overwrites stored location |
+
+Admin endpoints require an `X-Admin-Token` header matching the backend's `ADMIN_TOKEN` env var.
 
 ## Notes
 

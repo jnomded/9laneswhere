@@ -152,18 +152,36 @@ async def get_track(pool: asyncpg.Pool, track_id: int) -> dict | None:
 
 
 async def set_track_status(
-    pool: asyncpg.Pool, track_id: int, status: str, verified_by: str | None
+    pool: asyncpg.Pool,
+    track_id: int,
+    status: str,
+    verified_by: str | None,
+    lat: float | None = None,
+    lng: float | None = None,
 ) -> bool:
-    result = await pool.execute(
-        """
-        UPDATE detected_tracks
-        SET status      = $2,
-            verified_by = $3,
-            verified_at = CASE WHEN $2 IN ('verified', 'rejected') THEN now() ELSE NULL END
-        WHERE id = $1
-        """,
-        track_id, status, verified_by,
-    )
+    if lat is not None and lng is not None:
+        result = await pool.execute(
+            """
+            UPDATE detected_tracks
+            SET status      = $2,
+                verified_by = $3,
+                verified_at = CASE WHEN $2 IN ('verified', 'rejected') THEN now() ELSE NULL END,
+                location    = ST_SetSRID(ST_MakePoint($4, $5), 4326)
+            WHERE id = $1
+            """,
+            track_id, status, verified_by, lng, lat,
+        )
+    else:
+        result = await pool.execute(
+            """
+            UPDATE detected_tracks
+            SET status      = $2,
+                verified_by = $3,
+                verified_at = CASE WHEN $2 IN ('verified', 'rejected') THEN now() ELSE NULL END
+            WHERE id = $1
+            """,
+            track_id, status, verified_by,
+        )
     return result != "UPDATE 0"
 
 
