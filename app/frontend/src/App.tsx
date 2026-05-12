@@ -39,6 +39,7 @@ function confidenceColor(conf: number): string {
 export default function App() {
   const mapRef = useRef<MapRef>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const moveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [viewState, setViewState] = useState({
     longitude: -98.5795,
@@ -98,18 +99,56 @@ export default function App() {
     if (!adminMode) setPickMode(null)
   }, [adminMode])
 
+  // Bbox of the current viewport, padded so panning isn't constantly refetching.
+  // Returns null if the map isn't ready, or if we're zoomed out far enough that
+  // the bbox would cover most of the planet (just fetch unbounded then).
+  const computeBboxParams = (): Record<string, string> | null => {
+    const map = mapRef.current?.getMap()
+    if (!map) return null
+    const b = map.getBounds()
+    if (!b) return null
+    const south = b.getSouth()
+    const north = b.getNorth()
+    const west = b.getWest()
+    const east = b.getEast()
+    if (east - west >= 300) return null  // close to whole-world view
+    const padLng = (east - west) * 0.5
+    const padLat = (north - south) * 0.5
+    return {
+      min_lat: String(Math.max(-85, south - padLat)),
+      min_lng: String(Math.max(-180, west - padLng)),
+      max_lat: String(Math.min(85, north + padLat)),
+      max_lng: String(Math.min(180, east + padLng)),
+    }
+  }
+
+  const buildTracksUrl = (base: Record<string, string>): string => {
+    const params = new URLSearchParams(base)
+    const bbox = computeBboxParams()
+    if (bbox) for (const [k, v] of Object.entries(bbox)) params.set(k, v)
+    return `${API_URL}/tracks?${params}`
+  }
+
   const loadVerifiedTracks = async () => {
     try {
-      const res = await fetch(`${API_URL}/tracks?status=verified`)
+      const res = await fetch(buildTracksUrl({ status: 'verified' }))
       if (res.ok) setVerifiedTracks((await res.json()).tracks)
     } catch { /* silently fail */ }
   }
 
   const loadPendingTracks = async () => {
     try {
-      const res = await authedFetch(`${API_URL}/tracks?status=pending&min_confidence=0`)
+      const res = await authedFetch(buildTracksUrl({ status: 'pending', min_confidence: '0' }))
       if (res.ok) setPendingTracks((await res.json()).tracks)
     } catch {}
+  }
+
+  const handleMapMoveEnd = () => {
+    if (moveDebounceRef.current) clearTimeout(moveDebounceRef.current)
+    moveDebounceRef.current = setTimeout(() => {
+      loadVerifiedTracks()
+      if (adminMode) loadPendingTracks()
+    }, 250)
   }
 
   const handleVerifyTrack = async (id: number, status: 'verified' | 'rejected') => {
@@ -487,6 +526,8 @@ export default function App() {
           ref={mapRef}
           {...viewState}
           onMove={(e) => setViewState(e.viewState)}
+          onMoveEnd={handleMapMoveEnd}
+          onLoad={handleMapMoveEnd}
           mapStyle="mapbox://styles/mapbox/satellite-v9"
           mapboxAccessToken={MAPBOX_TOKEN}
           style={{ width: '100%', height: '100%' }}
