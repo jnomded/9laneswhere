@@ -585,6 +585,110 @@ body {
   color: #444;
 }
 
+.popup-meta {
+  font-size: 11px;
+  color: #bbb;
+  margin-top: 4px;
+}
+
+.popup-notes {
+  font-size: 11px;
+  color: #999;
+  margin-top: 4px;
+  white-space: pre-wrap;
+}
+
+.popup-meta-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 2px;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #aaa;
+}
+
+.manual-notice {
+  position: relative;
+  font-size: 11px;
+  color: #f5a623;
+  background: rgba(245, 166, 35, 0.08);
+  border: 1px solid rgba(245, 166, 35, 0.3);
+  padding: 6px 22px 6px 8px;
+  margin-top: 4px;
+}
+
+.manual-notice-dismiss {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.popup-revisions {
+  margin-top: 6px;
+  font-size: 11px;
+}
+
+.revisions-toggle {
+  font-size: 11px;
+  width: 100%;
+  text-align: left;
+  padding: 3px 6px;
+}
+
+.revisions-list {
+  margin-top: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-right: 2px;
+}
+
+.revisions-loading,
+.revisions-empty {
+  color: #777;
+  font-size: 11px;
+}
+
+.revision-row {
+  border-left: 2px solid #333;
+  padding: 2px 0 2px 6px;
+}
+
+.revision-meta {
+  color: #888;
+}
+
+.revision-action {
+  color: #ddd;
+  font-weight: 600;
+}
+
+.revision-action-verified { color: #5b8af5; }
+.revision-action-rejected { color: #f55b5b; }
+.revision-action-resurrect { color: #f5a623; }
+.revision-action-manual_add,
+.revision-action-manual_update { color: #00c48c; }
+.revision-action-metadata { color: #b48af5; }
+
+.revision-changes {
+  color: #aaa;
+  margin-top: 1px;
+  word-break: break-word;
+}
+
 .submit-done {
   margin: 6px 0 2px;
   font-size: 11px;

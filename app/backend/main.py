@@ -33,7 +33,8 @@ async def lifespan(app: FastAPI):
     dsn = os.getenv("DATABASE_URL", "")
     if dsn:
         app.state.db_pool = await _db.create_pool(dsn)
-        logger.info("Database pool created.")
+        await _db.ensure_schema(app.state.db_pool)
+        logger.info("Database pool created and schema migrations applied.")
     else:
         app.state.db_pool = None
         logger.warning("DATABASE_URL not set — running without database (no caching).")
@@ -83,11 +84,22 @@ class ScanRequest(BaseModel):
     threshold: float = Field(default=0.65, ge=0.5, le=0.99)
 
 
+SURFACE_VALUES = {"synthetic", "dirt", "grass", "asphalt", "cinder", "other", "unknown"}
+ACCESS_VALUES  = {"public", "school", "university", "private", "unknown"}
+
+
 class TrackSubmission(BaseModel):
     lat: float
     lng: float
     name: str | None = None
     submitted_by: str | None = None
+    lane_count: int | None = Field(default=None, ge=1, le=20)
+    surface: str | None = None
+    length_m: int | None = Field(default=None, ge=50, le=1000)
+    is_indoor: bool | None = None
+    access_type: str | None = None
+    country: str | None = None
+    notes: str | None = None
 
 
 class TrackStatusUpdate(BaseModel):
@@ -97,8 +109,28 @@ class TrackStatusUpdate(BaseModel):
     lng: float | None = None
 
 
+class TrackMetadataUpdate(BaseModel):
+    name: str | None = None
+    submitted_by: str | None = None
+    lane_count: int | None = Field(default=None, ge=1, le=20)
+    surface: str | None = None
+    length_m: int | None = Field(default=None, ge=50, le=1000)
+    is_indoor: bool | None = None
+    access_type: str | None = None
+    country: str | None = None
+    notes: str | None = None
+
+
 class AdminLoginRequest(BaseModel):
     token: str
+
+
+def _validate_enum(value: str | None, allowed: set[str], field: str) -> None:
+    if value is not None and value not in allowed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid {field}: must be one of {sorted(allowed)} or null.",
+        )
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -129,10 +161,17 @@ async def scan(req: ScanRequest):
 async def submit_track(body: TrackSubmission):
     if app.state.db_pool is None:
         raise HTTPException(status_code=503, detail="Database not configured.")
-    track_id = await _db.submit_track(
-        app.state.db_pool, body.lat, body.lng, body.name, body.submitted_by
+    _validate_enum(body.surface, SURFACE_VALUES, "surface")
+    _validate_enum(body.access_type, ACCESS_VALUES, "access_type")
+    metadata = body.model_dump(exclude={"lat", "lng", "name", "submitted_by"}, exclude_none=True)
+    return await _db.submit_track(
+        app.state.db_pool,
+        body.lat,
+        body.lng,
+        body.name,
+        body.submitted_by,
+        metadata=metadata,
     )
-    return {"id": track_id}
 
 
 @app.get("/tracks")
@@ -182,3 +221,30 @@ async def update_track_status(track_id: int, body: TrackStatusUpdate):
     if not updated:
         raise HTTPException(status_code=404, detail="Track not found.")
     return {"id": track_id, "status": body.status}
+
+
+@app.patch("/tracks/{track_id}", dependencies=[Depends(require_admin)])
+async def update_track_metadata(
+    track_id: int,
+    body: TrackMetadataUpdate,
+    x_admin_token: str | None = Header(default=None),
+):
+    if app.state.db_pool is None:
+        raise HTTPException(status_code=503, detail="Database not configured.")
+    _validate_enum(body.surface, SURFACE_VALUES, "surface")
+    _validate_enum(body.access_type, ACCESS_VALUES, "access_type")
+    fields = body.model_dump(exclude_none=True)
+    updated = await _db.update_track_metadata(
+        app.state.db_pool, track_id, fields, revised_by="admin"
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Track not found.")
+    return updated
+
+
+@app.get("/tracks/{track_id}/revisions", dependencies=[Depends(require_admin)])
+async def get_track_revisions(track_id: int):
+    if app.state.db_pool is None:
+        raise HTTPException(status_code=503, detail="Database not configured.")
+    revisions = await _db.get_track_revisions(app.state.db_pool, track_id)
+    return {"revisions": revisions, "count": len(revisions)}

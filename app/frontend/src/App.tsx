@@ -9,7 +9,28 @@ import Map, {
 import type { MapRef, MapLayerMouseEvent } from 'react-map-gl'
 import 'mapbox-gl/dist/mapbox-gl.css'
 import './App.css'
-import type { Detection, GeocodingFeature, ScanResult, Track } from './types'
+import type {
+  Detection,
+  GeocodingFeature,
+  ScanResult,
+  Track,
+  SubmitTrackResponse,
+  Surface,
+  AccessType,
+  Revision,
+} from './types'
+import { SURFACE_VALUES, ACCESS_VALUES } from './types'
+
+type MetadataEdits = Partial<{
+  name: string | null
+  lane_count: number | null
+  surface: Surface | null
+  length_m: number | null
+  is_indoor: boolean
+  access_type: AccessType | null
+  country: string | null
+  notes: string | null
+}>
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string
 const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:8000'
@@ -61,6 +82,16 @@ export default function App() {
   >({})
   const [selectedPending, setSelectedPending] = useState<Track | null>(null)
 
+  // Per-track in-flight metadata edits (admin). Flushed on Save or Verify.
+  const [editedMetadata, setEditedMetadata] = useState<Record<number, MetadataEdits>>({})
+  // Which verified track id is currently showing the inline edit form.
+  const [editingVerifiedId, setEditingVerifiedId] = useState<number | null>(null)
+
+  // Revision history (admin only). Cached per track id, lazy-loaded on first open.
+  const [revisionsCache, setRevisionsCache] = useState<Record<number, Revision[]>>({})
+  const [revisionsLoadingFor, setRevisionsLoadingFor] = useState<number | null>(null)
+  const [showRevisionsFor, setShowRevisionsFor] = useState<number | null>(null)
+
   // Pick mode: which field is waiting for a map click
   const [pickMode, setPickMode] = useState<'scan-center' | 'add-track' | null>(null)
 
@@ -84,9 +115,34 @@ export default function App() {
   const [manualLng, setManualLng] = useState('')
   const [manualName, setManualName] = useState('')
   const [manualBy, setManualBy] = useState('')
+  const [manualLanes, setManualLanes] = useState('')
+  const [manualSurface, setManualSurface] = useState<Surface | ''>('')
+  const [manualLengthM, setManualLengthM] = useState('')
+  const [manualAccess, setManualAccess] = useState<AccessType | ''>('')
+  const [manualIndoor, setManualIndoor] = useState(false)
+  const [manualNotice, setManualNotice] = useState<string | null>(null)
 
   useEffect(() => {
     loadVerifiedTracks()
+  }, [])
+
+  // On first load, try to recenter on the user's location at city-level zoom.
+  // If geolocation is unavailable or denied, the default US-wide view stays.
+  useEffect(() => {
+    if (!navigator.geolocation) return
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude, longitude } = pos.coords
+        const map = mapRef.current
+        if (map) {
+          map.flyTo({ center: [longitude, latitude], zoom: 11, duration: 1200 })
+        } else {
+          setViewState({ latitude: 44.04225175495486, longitude: -123.07078716926397, zoom: 11 })
+        }
+      },
+      () => {},
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 600000 },
+    )
   }, [])
 
   useEffect(() => {
@@ -151,8 +207,74 @@ export default function App() {
     }, 250)
   }
 
+  const flushMetadataEdits = async (id: number): Promise<void> => {
+    const edits = editedMetadata[id]
+    if (!edits || Object.keys(edits).length === 0) return
+    await authedFetch(`${API_URL}/tracks/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(edits),
+    })
+  }
+
+  const clearMetadataEdits = (id: number) => {
+    setEditedMetadata((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+  }
+
+  const setMetadataField = <K extends keyof MetadataEdits>(
+    id: number, field: K, value: MetadataEdits[K],
+  ) => {
+    setEditedMetadata((prev) => ({ ...prev, [id]: { ...prev[id], [field]: value } }))
+  }
+
+  const handleSaveMetadata = async (id: number) => {
+    try {
+      await flushMetadataEdits(id)
+      clearMetadataEdits(id)
+      setEditingVerifiedId((cur) => (cur === id ? null : cur))
+      // Invalidate the revisions cache so the new metadata entry shows up.
+      setRevisionsCache((prev) => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+      await Promise.all([loadPendingTracks(), loadVerifiedTracks()])
+    } catch {}
+  }
+
+  const loadRevisions = async (trackId: number) => {
+    setRevisionsLoadingFor(trackId)
+    try {
+      const res = await authedFetch(`${API_URL}/tracks/${trackId}/revisions`)
+      if (res.ok) {
+        const data = await res.json() as { revisions: Revision[] }
+        setRevisionsCache((prev) => ({ ...prev, [trackId]: data.revisions }))
+      }
+    } catch {}
+    finally {
+      setRevisionsLoadingFor((cur) => (cur === trackId ? null : cur))
+    }
+  }
+
+  const toggleRevisions = (trackId: number) => {
+    if (showRevisionsFor === trackId) {
+      setShowRevisionsFor(null)
+      return
+    }
+    setShowRevisionsFor(trackId)
+    if (!revisionsCache[trackId]) loadRevisions(trackId)
+  }
+
   const handleVerifyTrack = async (id: number, status: 'verified' | 'rejected') => {
     try {
+      // Persist any pending metadata edits before the status change so the
+      // revision log records them under their own action.
+      await flushMetadataEdits(id)
+
       const body: Record<string, unknown> = { status, verified_by: 'admin' }
       const dragged = draggedPositions[id]
       if (status === 'verified' && dragged) {
@@ -172,6 +294,8 @@ export default function App() {
         delete next[id]
         return next
       })
+      clearMetadataEdits(id)
+      setEditingVerifiedId((cur) => (cur === id ? null : cur))
       await Promise.all([loadPendingTracks(), loadVerifiedTracks()])
     } catch {}
   }
@@ -181,16 +305,51 @@ export default function App() {
     const lng = parseFloat(manualLng)
     if (isNaN(lat) || isNaN(lng)) return
     try {
-      await authedFetch(`${API_URL}/tracks`, {
+      const body: Record<string, unknown> = {
+        lat,
+        lng,
+        name: manualName || null,
+        submitted_by: manualBy || null,
+      }
+      if (manualLanes) body.lane_count = parseInt(manualLanes, 10)
+      if (manualSurface) body.surface = manualSurface
+      if (manualLengthM) body.length_m = parseInt(manualLengthM, 10)
+      if (manualAccess) body.access_type = manualAccess
+      if (manualIndoor) body.is_indoor = true
+
+      const res = await authedFetch(`${API_URL}/tracks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lat, lng, name: manualName || null, submitted_by: manualBy || null }),
+        body: JSON.stringify(body),
       })
+      if (!res.ok) return
+      const data = (await res.json()) as SubmitTrackResponse
+
       setManualLat('')
       setManualLng('')
       setManualName('')
       setManualBy('')
-      await loadPendingTracks()
+      setManualLanes('')
+      setManualSurface('')
+      setManualLengthM('')
+      setManualAccess('')
+      setManualIndoor(false)
+
+      if (data.resurrected) {
+        setManualNotice('A previously rejected track was resurrected at this location.')
+      } else if (data.matched_existing) {
+        setManualNotice(
+          `Existing track found within 600 m (status: ${data.status}). Metadata updated; coords were not changed.`,
+        )
+      } else {
+        setManualNotice(null)
+      }
+
+      // Center on the resolved position (which may differ from the clicked coords
+      // if the backend merged into an existing nearby track).
+      mapRef.current?.flyTo({ center: [data.lng, data.lat], zoom: 17, duration: 800 })
+      // The moveEnd handler will refetch; call explicitly too in case zoom doesn't change.
+      await Promise.all([loadPendingTracks(), loadVerifiedTracks()])
     } catch {}
   }
 
@@ -306,6 +465,122 @@ export default function App() {
   const scanBtnLabel = scanning ? 'Scanning...' : center
     ? `Scan ${radiusKm} km around ${center.name}`
     : 'Set a location first'
+
+  // Compact one-line metadata summary, or null if nothing is set.
+  const renderMetadataSummary = (t: Track) => {
+    const parts: string[] = []
+    if (t.lane_count) parts.push(`${t.lane_count} lanes`)
+    if (t.surface) parts.push(t.surface)
+    if (t.length_m) parts.push(`${t.length_m}m`)
+    if (t.is_indoor) parts.push('indoor')
+    if (t.access_type) parts.push(t.access_type)
+    if (t.country) parts.push(t.country)
+    return parts.length ? <div className="popup-meta">{parts.join(' · ')}</div> : null
+  }
+
+  // Per-revision diff: list of "field: old → new" for non-noise fields.
+  const summarizeRevisionDiff = (r: Revision): string | null => {
+    if (!r.old_data) return null
+    const old_data = r.old_data ?? {}
+    const new_data = r.new_data ?? {}
+    const noise = new Set(['last_confirmed_at', 'scan_count', 'id', 'first_seen_at'])
+    const parts: string[] = []
+    for (const k of Object.keys(new_data)) {
+      if (noise.has(k)) continue
+      const a = JSON.stringify(old_data[k] ?? null)
+      const b = JSON.stringify(new_data[k] ?? null)
+      if (a === b) continue
+      const fmt = (s: string) => (s.length > 22 ? s.slice(0, 22) + '…' : s)
+      parts.push(`${k}: ${fmt(a)} → ${fmt(b)}`)
+    }
+    return parts.length ? parts.join(' · ') : null
+  }
+
+  const renderRevisionsBlock = (trackId: number) => {
+    const showing = showRevisionsFor === trackId
+    const revs = revisionsCache[trackId]
+    const loading = revisionsLoadingFor === trackId
+    return (
+      <div className="popup-revisions">
+        <button className="action-btn revisions-toggle" onClick={() => toggleRevisions(trackId)}>
+          {showing ? '▾' : '▸'} History{revs ? ` (${revs.length})` : ''}
+        </button>
+        {showing && (
+          <div className="revisions-list">
+            {loading && <div className="revisions-loading">Loading…</div>}
+            {revs && revs.length === 0 && <div className="revisions-empty">No history.</div>}
+            {revs && revs.map((r) => (
+              <div key={r.id} className="revision-row">
+                <div className="revision-meta">
+                  <span className={`revision-action revision-action-${r.action}`}>{r.action}</span>
+                  {' · '}{new Date(r.revised_at).toLocaleString()}
+                  {r.revised_by ? ` · ${r.revised_by}` : ''}
+                </div>
+                {summarizeRevisionDiff(r) && (
+                  <div className="revision-changes">{summarizeRevisionDiff(r)}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // Inline admin edit form for a track's metadata. Writes go to editedMetadata,
+  // flushed on Save (or on Verify via handleVerifyTrack).
+  const renderMetadataForm = (t: Track) => {
+    const e = editedMetadata[t.id] ?? {}
+    const v = <K extends keyof MetadataEdits>(k: K, fallback: MetadataEdits[K]): MetadataEdits[K] =>
+      (e[k] === undefined ? fallback : e[k])
+    const dirty = Object.keys(e).length > 0
+    return (
+      <div className="popup-meta-form">
+        <input className="popup-input" placeholder="Track name"
+          value={(v('name', t.name) ?? '') as string}
+          onChange={(ev) => setMetadataField(t.id, 'name', ev.target.value || null)} />
+        <div className="form-row">
+          <input className="popup-input" type="number" placeholder="Lanes" min={1} max={20}
+            value={(v('lane_count', t.lane_count) ?? '') as number | string}
+            onChange={(ev) => setMetadataField(t.id, 'lane_count', ev.target.value ? parseInt(ev.target.value, 10) : null)} />
+          <input className="popup-input" type="number" placeholder="Length (m)" min={50} max={1000}
+            value={(v('length_m', t.length_m) ?? '') as number | string}
+            onChange={(ev) => setMetadataField(t.id, 'length_m', ev.target.value ? parseInt(ev.target.value, 10) : null)} />
+        </div>
+        <div className="form-row">
+          <select className="popup-input"
+            value={(v('surface', t.surface) ?? '') as string}
+            onChange={(ev) => setMetadataField(t.id, 'surface', (ev.target.value || null) as Surface | null)}>
+            <option value="">Surface…</option>
+            {SURFACE_VALUES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <select className="popup-input"
+            value={(v('access_type', t.access_type) ?? '') as string}
+            onChange={(ev) => setMetadataField(t.id, 'access_type', (ev.target.value || null) as AccessType | null)}>
+            <option value="">Access…</option>
+            {ACCESS_VALUES.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+        </div>
+        <label className="checkbox-row">
+          <input type="checkbox"
+            checked={Boolean(v('is_indoor', t.is_indoor))}
+            onChange={(ev) => setMetadataField(t.id, 'is_indoor', ev.target.checked)} />
+          Indoor
+        </label>
+        <input className="popup-input" placeholder="Country (2-letter)" maxLength={2}
+          value={(v('country', t.country) ?? '') as string}
+          onChange={(ev) => setMetadataField(t.id, 'country', ev.target.value.toUpperCase() || null)} />
+        <textarea className="popup-input" placeholder="Notes" rows={2}
+          value={(v('notes', t.notes) ?? '') as string}
+          onChange={(ev) => setMetadataField(t.id, 'notes', ev.target.value || null)} />
+        {dirty && (
+          <button className="action-btn verify" onClick={() => handleSaveMetadata(t.id)}>
+            Save metadata
+          </button>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className="app">
@@ -441,9 +716,41 @@ export default function App() {
                   onChange={(e) => setManualName(e.target.value)} />
                 <input className="form-input" placeholder="Added by" value={manualBy}
                   onChange={(e) => setManualBy(e.target.value)} />
+
+                <div className="form-row">
+                  <input className="form-input" type="number" placeholder="Lanes" min={1} max={20}
+                    value={manualLanes} onChange={(e) => setManualLanes(e.target.value)} />
+                  <input className="form-input" type="number" placeholder="Length (m)" min={50} max={1000}
+                    value={manualLengthM} onChange={(e) => setManualLengthM(e.target.value)} />
+                </div>
+                <div className="form-row">
+                  <select className="form-input" value={manualSurface}
+                    onChange={(e) => setManualSurface(e.target.value as Surface | '')}>
+                    <option value="">Surface…</option>
+                    {SURFACE_VALUES.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                  <select className="form-input" value={manualAccess}
+                    onChange={(e) => setManualAccess(e.target.value as AccessType | '')}>
+                    <option value="">Access…</option>
+                    {ACCESS_VALUES.map((a) => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                </div>
+                <label className="checkbox-row">
+                  <input type="checkbox" checked={manualIndoor}
+                    onChange={(e) => setManualIndoor(e.target.checked)} />
+                  Indoor
+                </label>
+
                 <button className="scan-btn" onClick={handleManualAdd} disabled={!manualLat || !manualLng}>
                   Add Track
                 </button>
+
+                {manualNotice && (
+                  <div className="manual-notice">
+                    {manualNotice}
+                    <button className="manual-notice-dismiss" onClick={() => setManualNotice(null)}>✕</button>
+                  </div>
+                )}
               </div>
 
               {/* Pending section */}
@@ -644,6 +951,11 @@ export default function App() {
               adminMode && selectedMarker.track_id != null && draggedPositions[selectedMarker.track_id]
                 ? draggedPositions[selectedMarker.track_id]
                 : { lat: selectedMarker.lat, lng: selectedMarker.lng }
+            // The detection may correspond to an existing pending track row;
+            // grab it so admins can fill in metadata before verifying.
+            const trackForEdit = selectedMarker.track_id != null
+              ? pendingTracks.find((t) => t.id === selectedMarker.track_id)
+              : undefined
             return (
               <Popup longitude={pos.lng} latitude={pos.lat}
                 anchor="bottom" offset={14} onClose={() => setSelectedMarker(null)} closeButton>
@@ -655,12 +967,14 @@ export default function App() {
                   {adminMode && selectedMarker.track_id != null && (
                     <div className="popup-hint">Drag the pin onto the actual track before verifying.</div>
                   )}
+                  {adminMode && trackForEdit && renderMetadataForm(trackForEdit)}
                   {selectedMarker.track_id != null && (
                     <div className="popup-actions">
                       <button className="action-btn verify" onClick={() => handleVerifyTrack(selectedMarker.track_id!, 'verified')}>✓ Verify</button>
                       <button className="action-btn reject" onClick={() => handleVerifyTrack(selectedMarker.track_id!, 'rejected')}>✗ Reject</button>
                     </div>
                   )}
+                  {adminMode && selectedMarker.track_id != null && renderRevisionsBlock(selectedMarker.track_id)}
                   <a className="popup-link"
                     href={`https://www.google.com/maps/@${pos.lat},${pos.lng},18z`}
                     target="_blank" rel="noopener noreferrer">
@@ -682,10 +996,12 @@ export default function App() {
                   {selectedPending.name && <div className="popup-track-name">{selectedPending.name}</div>}
                   <div className="popup-subtitle">{pos.lat.toFixed(4)}°, {pos.lng.toFixed(4)}°</div>
                   <div className="popup-hint">Drag the pin onto the actual track before verifying.</div>
+                  {renderMetadataForm(selectedPending)}
                   <div className="popup-actions">
                     <button className="action-btn verify" onClick={() => handleVerifyTrack(selectedPending.id, 'verified')}>✓ Verify</button>
                     <button className="action-btn reject" onClick={() => handleVerifyTrack(selectedPending.id, 'rejected')}>✗ Reject</button>
                   </div>
+                  {renderRevisionsBlock(selectedPending.id)}
                   <a className="popup-link"
                     href={`https://www.google.com/maps/@${pos.lat},${pos.lng},18z`}
                     target="_blank" rel="noopener noreferrer">
@@ -706,10 +1022,27 @@ export default function App() {
                 <div className="popup-subtitle">
                   {selectedVerified.lat.toFixed(4)}°, {selectedVerified.lng.toFixed(4)}°
                 </div>
+                {editingVerifiedId === selectedVerified.id
+                  ? renderMetadataForm(selectedVerified)
+                  : renderMetadataSummary(selectedVerified)}
+                {selectedVerified.notes && editingVerifiedId !== selectedVerified.id && (
+                  <div className="popup-notes">{selectedVerified.notes}</div>
+                )}
                 {adminMode && (
-                  <div className="popup-actions">
-                    <button className="action-btn reject" onClick={() => handleVerifyTrack(selectedVerified.id, 'rejected')}>✗ Reject</button>
-                  </div>
+                  <>
+                    <div className="popup-actions">
+                      <button
+                        className="action-btn"
+                        onClick={() => setEditingVerifiedId(
+                          editingVerifiedId === selectedVerified.id ? null : selectedVerified.id,
+                        )}
+                      >
+                        {editingVerifiedId === selectedVerified.id ? 'Done editing' : 'Edit metadata'}
+                      </button>
+                      <button className="action-btn reject" onClick={() => handleVerifyTrack(selectedVerified.id, 'rejected')}>✗ Reject</button>
+                    </div>
+                    {renderRevisionsBlock(selectedVerified.id)}
+                  </>
                 )}
                 <a className="popup-link"
                   href={`https://www.google.com/maps/@${selectedVerified.lat},${selectedVerified.lng},18z`}

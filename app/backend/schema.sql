@@ -26,8 +26,29 @@ CREATE TABLE IF NOT EXISTS detected_tracks (
     last_confirmed_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
     scan_count        INTEGER      NOT NULL DEFAULT 1,
     name              TEXT,
-    submitted_by      TEXT
+    submitted_by      TEXT,
+    lane_count        SMALLINT,
+    surface           TEXT,
+    length_m          SMALLINT,
+    is_indoor         BOOLEAN      NOT NULL DEFAULT FALSE,
+    access_type       TEXT,
+    country           TEXT,
+    notes             TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_detected_tracks_location ON detected_tracks USING GIST (location);
 CREATE INDEX IF NOT EXISTS idx_detected_tracks_status   ON detected_tracks (status);
+
+-- Append-only audit log of every change made to a track row.
+CREATE TABLE IF NOT EXISTS track_revisions (
+    id           BIGSERIAL    PRIMARY KEY,
+    track_id     BIGINT       NOT NULL REFERENCES detected_tracks(id) ON DELETE CASCADE,
+    revised_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    revised_by   TEXT,
+    action       TEXT         NOT NULL,
+    old_data     JSONB,
+    new_data     JSONB,
+    note         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_track_revisions_track ON track_revisions (track_id, revised_at DESC);
