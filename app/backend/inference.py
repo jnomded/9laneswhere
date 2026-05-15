@@ -186,52 +186,71 @@ async def _fetch_tile(
             return None
 
 
-async def scan_area(
+async def scan_area_stream(
     lat: float,
     lng: float,
     radius_km: float,
     threshold: float = 0.65,
     db_pool: asyncpg.Pool | None = None,
-) -> dict:
+):
+    """
+    Async generator that yields progress events while running a scan.
+
+    Event shapes:
+      {"type": "progress", "phase": <str>, "completed": <int>, "total": <int>}
+      {"type": "result",   "detections": [...], "tiles_scanned": N, ...}
+
+    `scan_area` is a thin wrapper that consumes this and returns the final result.
+    """
     import db as _db
 
     points = _grid_points(lat, lng, radius_km)
     model = load_model()
     sem = asyncio.Semaphore(CONCURRENCY)
 
-    # Normalise grid points to canonical slippy-map tile keys and deduplicate.
     tile_map: dict[tuple[int, int, int], tuple[float, float]] = {}
     for pt in points:
         zxy = _lat_lng_to_tile(pt[0], pt[1])
         if zxy not in tile_map:
             tile_map[zxy] = _tile_center(*zxy)
+    unique_tiles = list(tile_map.items())
+    total = len(unique_tiles)
 
-    unique_tiles = list(tile_map.items())  # [(z,x,y), (tile_lat, tile_lng)]
+    yield {"type": "progress", "phase": "starting", "completed": 0, "total": total}
 
-    # --- Cache lookup ---
     cache_hits: dict[tuple[int, int, int], dict] = {}
     if db_pool is not None:
         cache_hits = await _db.get_cached_tiles(db_pool, [k for k, _ in unique_tiles])
 
     tiles_to_fetch = [(zxy, coords) for zxy, coords in unique_tiles if zxy not in cache_hits]
+    completed = len(cache_hits)
+    yield {"type": "progress", "phase": "fetching", "completed": completed, "total": total}
 
-    # --- Fetch only uncached tiles ---
-    async with httpx.AsyncClient() as client:
-        tasks = [_fetch_tile(client, sem, coords[0], coords[1]) for _, coords in tiles_to_fetch]
-        fetched_images = await asyncio.gather(*tasks)
-
-    # --- ML inference on fetched tiles ---
     valid_fetched: list[tuple[tuple[int, int, int], tuple[float, float], np.ndarray]] = []
-    for (zxy, coords), img in zip(tiles_to_fetch, fetched_images):
-        if img is not None:
-            valid_fetched.append((zxy, coords, img))
+
+    async with httpx.AsyncClient() as client:
+        async def fetch_with_meta(zxy, coords):
+            img = await _fetch_tile(client, sem, coords[0], coords[1])
+            return zxy, coords, img
+
+        tasks = [
+            asyncio.create_task(fetch_with_meta(zxy, coords))
+            for zxy, coords in tiles_to_fetch
+        ]
+        for fut in asyncio.as_completed(tasks):
+            zxy, coords, img = await fut
+            if img is not None:
+                valid_fetched.append((zxy, coords, img))
+            completed += 1
+            yield {"type": "progress", "phase": "fetching", "completed": completed, "total": total}
+
+    yield {"type": "progress", "phase": "inferring", "completed": completed, "total": total}
 
     preds_fetched = np.array([], dtype=np.float32)
     if valid_fetched:
         batch = np.stack([entry[2] for entry in valid_fetched])
         preds_fetched = model.predict(batch, batch_size=16, verbose=0).flatten()
 
-    # --- Persist new tile results to cache ---
     new_cache_entries: list[dict] = []
     for idx, (zxy, coords, _) in enumerate(valid_fetched):
         new_cache_entries.append({
@@ -239,18 +258,15 @@ async def scan_area(
             "tile_lat": coords[0], "tile_lng": coords[1],
             "ml_score": float(preds_fetched[idx]),
         })
-
     if db_pool is not None and new_cache_entries:
         await _db.upsert_tiles(db_pool, new_cache_entries)
 
-    # --- Merge cache hits + live results into unified scored list ---
     fetched_by_zxy: dict[tuple[int, int, int], float] = {
         zxy: float(preds_fetched[idx]) for idx, (zxy, _, _) in enumerate(valid_fetched)
     }
 
     valid_points: list[tuple[float, float]] = []
     scores_list: list[float] = []
-
     for zxy, coords in unique_tiles:
         if zxy in cache_hits:
             valid_points.append(coords)
@@ -259,8 +275,14 @@ async def scan_area(
             valid_points.append(coords)
             scores_list.append(fetched_by_zxy[zxy])
 
+    yield {"type": "progress", "phase": "clustering", "completed": total, "total": total}
+
     if not valid_points:
-        return {"detections": [], "tiles_scanned": 0, "tiles_from_cache": 0, "tiles_fetched_live": 0}
+        yield {
+            "type": "result", "detections": [], "tiles_scanned": 0,
+            "tiles_from_cache": 0, "tiles_fetched_live": 0,
+        }
+        return
 
     preds = np.array(scores_list, dtype=np.float32)
     neighbor_map = _build_neighbor_map(valid_points, NEIGHBOR_RADIUS_KM)
@@ -272,20 +294,36 @@ async def scan_area(
         for i in range(len(valid_points))
         if preds[i] >= prelim
     ]
-
     detections = _cluster_detections(candidates, CLUSTER_RADIUS_KM)
     detections = [d for d in detections if d["confidence"] >= threshold]
     detections.sort(key=lambda x: x["confidence"], reverse=True)
 
-    # --- Persist clustered detections ---
     if db_pool is not None:
         for d in detections:
             track_id = await _db.upsert_detected_track(db_pool, d["lat"], d["lng"], d["confidence"])
             d["track_id"] = track_id
 
-    return {
+    yield {
+        "type": "result",
         "detections": detections,
         "tiles_scanned": len(valid_points),
         "tiles_from_cache": len(cache_hits),
         "tiles_fetched_live": len(valid_fetched),
     }
+
+
+async def scan_area(
+    lat: float,
+    lng: float,
+    radius_km: float,
+    threshold: float = 0.65,
+    db_pool: asyncpg.Pool | None = None,
+) -> dict:
+    final: dict = {
+        "detections": [], "tiles_scanned": 0,
+        "tiles_from_cache": 0, "tiles_fetched_live": 0,
+    }
+    async for event in scan_area_stream(lat, lng, radius_km, threshold, db_pool=db_pool):
+        if event.get("type") == "result":
+            final = {k: v for k, v in event.items() if k != "type"}
+    return final

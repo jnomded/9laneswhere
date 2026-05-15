@@ -32,7 +32,6 @@ CREATE TABLE IF NOT EXISTS detected_tracks (
     length_m          SMALLINT,
     is_indoor         BOOLEAN      NOT NULL DEFAULT FALSE,
     access_type       TEXT,
-    country           TEXT,
     notes             TEXT
 );
 

@@ -21,7 +21,6 @@ export interface TrackMetadata {
   length_m: number | null
   is_indoor: boolean
   access_type: AccessType | null
-  country: string | null
   notes: string | null
 }
 

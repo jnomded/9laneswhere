@@ -28,8 +28,9 @@ type MetadataEdits = Partial<{
   length_m: number | null
   is_indoor: boolean
   access_type: AccessType | null
-  country: string | null
   notes: string | null
+  lat: number
+  lng: number
 }>
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string
@@ -102,6 +103,7 @@ export default function App() {
   const [radiusKm, setRadiusKm] = useState(5)
   const [threshold, setThreshold] = useState(65)
   const [scanning, setScanning] = useState(false)
+  const [scanProgress, setScanProgress] = useState<{ phase: string; completed: number; total: number } | null>(null)
   const [result, setResult] = useState<ScanResult | null>(null)
   const [selectedMarker, setSelectedMarker] = useState<Detection | null>(null)
 
@@ -233,8 +235,26 @@ export default function App() {
 
   const handleSaveMetadata = async (id: number) => {
     try {
-      await flushMetadataEdits(id)
+      const edits = editedMetadata[id] ?? {}
+      const dragged = draggedPositions[id]
+      const body: Record<string, unknown> = { ...edits }
+      if (dragged) {
+        body.lat = dragged.lat
+        body.lng = dragged.lng
+      }
+      if (Object.keys(body).length > 0) {
+        await authedFetch(`${API_URL}/tracks/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+      }
       clearMetadataEdits(id)
+      setDraggedPositions((prev) => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
       setEditingVerifiedId((cur) => (cur === id ? null : cur))
       // Invalidate the revisions cache so the new metadata entry shows up.
       setRevisionsCache((prev) => {
@@ -294,8 +314,21 @@ export default function App() {
         delete next[id]
         return next
       })
+      // Strip the just-acted-on detection from the scan result so its old
+      // tile-centroid marker doesn't keep prompting verify on top of the new
+      // verified marker.
+      setResult((prev) =>
+        prev
+          ? { ...prev, detections: prev.detections.filter((d) => d.track_id !== id) }
+          : prev,
+      )
       clearMetadataEdits(id)
       setEditingVerifiedId((cur) => (cur === id ? null : cur))
+      setRevisionsCache((prev) => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
       await Promise.all([loadPendingTracks(), loadVerifiedTracks()])
     } catch {}
   }
@@ -395,11 +428,15 @@ export default function App() {
   const selectSuggestion = (feature: GeocodingFeature) => {
     const [lng, lat] = feature.center
     const shortName = feature.place_name.split(',')[0]
-    setCenter({ lat, lng, name: shortName })
+    // The scan-center selection only makes sense in admin mode; in the public
+    // view we just fly to the location so users can browse for nearby tracks.
+    if (adminMode) {
+      setCenter({ lat, lng, name: shortName })
+      setResult(null)
+      setSelectedMarker(null)
+    }
     setSearchQuery(shortName)
     setSuggestions([])
-    setResult(null)
-    setSelectedMarker(null)
     mapRef.current?.flyTo({ center: [lng, lat], zoom: 12, duration: 1500 })
   }
 
@@ -446,18 +483,46 @@ export default function App() {
     setScanning(true)
     setResult(null)
     setSelectedMarker(null)
+    setScanProgress({ phase: 'starting', completed: 0, total: 0 })
     try {
-      const res = await authedFetch(`${API_URL}/scan`, {
+      const res = await authedFetch(`${API_URL}/scan/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ lat: center.lat, lng: center.lng, radius_km: radiusKm, threshold: threshold / 100 }),
       })
-      if (!res.ok) throw new Error(`API error ${res.status}`)
-      setResult(await res.json())
+      if (!res.ok || !res.body) throw new Error(`API error ${res.status}`)
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        // SSE events are separated by a blank line.
+        const events = buffer.split('\n\n')
+        buffer = events.pop() ?? ''
+        for (const ev of events) {
+          const line = ev.trim()
+          if (!line.startsWith('data: ')) continue
+          let data: any
+          try { data = JSON.parse(line.slice(6)) } catch { continue }
+          if (data.type === 'progress') {
+            setScanProgress({ phase: data.phase, completed: data.completed, total: data.total })
+          } else if (data.type === 'result') {
+            setResult({
+              detections: data.detections,
+              tiles_scanned: data.tiles_scanned,
+              tiles_from_cache: data.tiles_from_cache,
+              tiles_fetched_live: data.tiles_fetched_live,
+            })
+          }
+        }
+      }
     } catch (err) {
       console.error('Scan failed:', err)
     } finally {
       setScanning(false)
+      setScanProgress(null)
     }
   }
 
@@ -474,7 +539,6 @@ export default function App() {
     if (t.length_m) parts.push(`${t.length_m}m`)
     if (t.is_indoor) parts.push('indoor')
     if (t.access_type) parts.push(t.access_type)
-    if (t.country) parts.push(t.country)
     return parts.length ? <div className="popup-meta">{parts.join(' · ')}</div> : null
   }
 
@@ -533,7 +597,7 @@ export default function App() {
     const e = editedMetadata[t.id] ?? {}
     const v = <K extends keyof MetadataEdits>(k: K, fallback: MetadataEdits[K]): MetadataEdits[K] =>
       (e[k] === undefined ? fallback : e[k])
-    const dirty = Object.keys(e).length > 0
+    const dirty = Object.keys(e).length > 0 || draggedPositions[t.id] != null
     return (
       <div className="popup-meta-form">
         <input className="popup-input" placeholder="Track name"
@@ -567,9 +631,6 @@ export default function App() {
             onChange={(ev) => setMetadataField(t.id, 'is_indoor', ev.target.checked)} />
           Indoor
         </label>
-        <input className="popup-input" placeholder="Country (2-letter)" maxLength={2}
-          value={(v('country', t.country) ?? '') as string}
-          onChange={(ev) => setMetadataField(t.id, 'country', ev.target.value.toUpperCase() || null)} />
         <textarea className="popup-input" placeholder="Notes" rows={2}
           value={(v('notes', t.notes) ?? '') as string}
           onChange={(ev) => setMetadataField(t.id, 'notes', ev.target.value || null)} />
@@ -793,12 +854,30 @@ export default function App() {
           ) : (
             /* ── User / map panel ─────────────────────── */
             <>
+              <div className="search-container">
+                <input
+                  className="search-input"
+                  placeholder="Search location..."
+                  value={searchQuery}
+                  onChange={(e) => { setSearchQuery(e.target.value); fetchSuggestions(e.target.value) }}
+                  onKeyDown={(e) => e.key === 'Escape' && setSuggestions([])}
+                />
+                {suggestions.length > 0 && (
+                  <div className="suggestions">
+                    {suggestions.map((s, i) => (
+                      <div key={i} className="suggestion-item" onClick={() => selectSuggestion(s)}>
+                        {s.place_name}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               <p className="map-hint">
                 {verifiedTracks.length > 0
                   ? `${verifiedTracks.length} verified track${verifiedTracks.length !== 1 ? 's' : ''} on the map.`
                   : 'No verified tracks yet.'}
               </p>
-              
             </>
           )}
         </div>
@@ -851,16 +930,37 @@ export default function App() {
             </Source>
           )}
 
-          {/* Verified track markers */}
-          {verifiedTracks.map((t) => (
-            <Marker key={`v-${t.id}`} longitude={t.lng} latitude={t.lat} anchor="center">
-              <div
-                className="verified-marker"
-                style={{ transform: selectedVerified?.id === t.id ? 'rotate(45deg) scale(1.3)' : 'rotate(45deg)' }}
-                onClick={(e) => { e.stopPropagation(); setSelectedVerified(t); setSelectedMarker(null) }}
-              />
-            </Marker>
-          ))}
+          {/* Verified track markers — draggable while their inline edit form is open */}
+          {verifiedTracks.map((t) => {
+            const isEditing = adminMode && editingVerifiedId === t.id
+            const pos = isEditing
+              ? (draggedPositions[t.id] ?? { lat: t.lat, lng: t.lng })
+              : { lat: t.lat, lng: t.lng }
+            return (
+              <Marker
+                key={`v-${t.id}`}
+                longitude={pos.lng}
+                latitude={pos.lat}
+                anchor="center"
+                draggable={isEditing}
+                onDragEnd={(e) =>
+                  setDraggedPositions((prev) => ({
+                    ...prev,
+                    [t.id]: { lat: e.lngLat.lat, lng: e.lngLat.lng },
+                  }))
+                }
+              >
+                <div
+                  className="verified-marker"
+                  style={{
+                    transform: selectedVerified?.id === t.id ? 'rotate(45deg) scale(1.3)' : 'rotate(45deg)',
+                    cursor: isEditing ? 'grab' : 'pointer',
+                  }}
+                  onClick={(e) => { e.stopPropagation(); setSelectedVerified(t); setSelectedMarker(null) }}
+                />
+              </Marker>
+            )
+          })}
 
           {/* Pending track markers (admin mode) — draggable to refine before verify */}
           {adminMode && pendingTracks
@@ -1013,45 +1113,52 @@ export default function App() {
           })()}
 
           {/* Verified track popup */}
-          {selectedVerified && (
-            <Popup longitude={selectedVerified.lng} latitude={selectedVerified.lat}
-              anchor="bottom" offset={14} onClose={() => setSelectedVerified(null)} closeButton>
-              <div className="popup-content">
-                <div className="popup-verified-badge">✓ Verified Track</div>
-                {selectedVerified.name && <div className="popup-track-name">{selectedVerified.name}</div>}
-                <div className="popup-subtitle">
-                  {selectedVerified.lat.toFixed(4)}°, {selectedVerified.lng.toFixed(4)}°
+          {selectedVerified && (() => {
+            const isEditing = adminMode && editingVerifiedId === selectedVerified.id
+            const pos = isEditing
+              ? (draggedPositions[selectedVerified.id] ?? { lat: selectedVerified.lat, lng: selectedVerified.lng })
+              : { lat: selectedVerified.lat, lng: selectedVerified.lng }
+            return (
+              <Popup longitude={pos.lng} latitude={pos.lat}
+                anchor="bottom" offset={14} onClose={() => setSelectedVerified(null)} closeButton>
+                <div className="popup-content">
+                  <div className="popup-verified-badge">✓ Verified Track</div>
+                  {selectedVerified.name && <div className="popup-track-name">{selectedVerified.name}</div>}
+                  <div className="popup-subtitle">
+                    {pos.lat.toFixed(4)}°, {pos.lng.toFixed(4)}°
+                  </div>
+                  {isEditing && (
+                    <div className="popup-hint">Drag the pin to relocate. Save to commit both metadata and location.</div>
+                  )}
+                  {isEditing
+                    ? renderMetadataForm(selectedVerified)
+                    : renderMetadataSummary(selectedVerified)}
+                  {selectedVerified.notes && !isEditing && (
+                    <div className="popup-notes">{selectedVerified.notes}</div>
+                  )}
+                  {adminMode && (
+                    <>
+                      <div className="popup-actions">
+                        <button
+                          className="action-btn"
+                          onClick={() => setEditingVerifiedId(isEditing ? null : selectedVerified.id)}
+                        >
+                          {isEditing ? 'Done editing' : 'Edit metadata'}
+                        </button>
+                        <button className="action-btn reject" onClick={() => handleVerifyTrack(selectedVerified.id, 'rejected')}>✗ Reject</button>
+                      </div>
+                      {renderRevisionsBlock(selectedVerified.id)}
+                    </>
+                  )}
+                  <a className="popup-link"
+                    href={`https://www.google.com/maps/@${pos.lat},${pos.lng},18z`}
+                    target="_blank" rel="noopener noreferrer">
+                    Open in Google Maps ↗
+                  </a>
                 </div>
-                {editingVerifiedId === selectedVerified.id
-                  ? renderMetadataForm(selectedVerified)
-                  : renderMetadataSummary(selectedVerified)}
-                {selectedVerified.notes && editingVerifiedId !== selectedVerified.id && (
-                  <div className="popup-notes">{selectedVerified.notes}</div>
-                )}
-                {adminMode && (
-                  <>
-                    <div className="popup-actions">
-                      <button
-                        className="action-btn"
-                        onClick={() => setEditingVerifiedId(
-                          editingVerifiedId === selectedVerified.id ? null : selectedVerified.id,
-                        )}
-                      >
-                        {editingVerifiedId === selectedVerified.id ? 'Done editing' : 'Edit metadata'}
-                      </button>
-                      <button className="action-btn reject" onClick={() => handleVerifyTrack(selectedVerified.id, 'rejected')}>✗ Reject</button>
-                    </div>
-                    {renderRevisionsBlock(selectedVerified.id)}
-                  </>
-                )}
-                <a className="popup-link"
-                  href={`https://www.google.com/maps/@${selectedVerified.lat},${selectedVerified.lng},18z`}
-                  target="_blank" rel="noopener noreferrer">
-                  Open in Google Maps ↗
-                </a>
-              </div>
-            </Popup>
-          )}
+              </Popup>
+            )
+          })()}
 
         </Map>
 
@@ -1063,7 +1170,29 @@ export default function App() {
           </div>
         )}
 
-        {scanning && <div className="scanning-badge">Scanning satellite imagery...</div>}
+        {scanning && (
+          <div className="scanning-badge">
+            <div className="scanning-label">
+              {scanProgress
+                ? `${scanProgress.phase === 'fetching' ? 'Fetching tiles' :
+                    scanProgress.phase === 'inferring' ? 'Running model' :
+                    scanProgress.phase === 'clustering' ? 'Clustering detections' :
+                    'Starting'}` +
+                  (scanProgress.total > 0 ? `: ${scanProgress.completed}/${scanProgress.total}` : '')
+                : 'Scanning satellite imagery...'}
+            </div>
+            <div className="progress-bar">
+              <div
+                className="progress-fill"
+                style={{
+                  width: scanProgress && scanProgress.total > 0
+                    ? `${(scanProgress.completed / scanProgress.total) * 100}%`
+                    : '0%',
+                }}
+              />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

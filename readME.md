@@ -105,10 +105,13 @@ docker-compose.yml
 | GET | `/health` | public | Health check |
 | POST | `/admin/login` | public | Validate an admin token; returns 200 on success |
 | POST | `/scan` | admin | Run ML scan over an area (lat, lng, radius_km, threshold) |
+| POST | `/scan/stream` | admin | Same as `/scan` but streams per-tile progress as Server-Sent Events |
 | GET | `/tracks` | public (`status=verified`) / admin (other) | List tracks, filterable by bounding box, status, confidence |
-| POST | `/tracks` | admin | Submit a track manually |
+| POST | `/tracks` | admin | Submit a track manually (optional metadata fields) |
 | GET | `/tracks/{id}` | public | Get a single track |
+| PATCH | `/tracks/{id}` | admin | Update metadata; optional `lat`/`lng` relocates the track |
 | PATCH | `/tracks/{id}/status` | admin | Set status to verified or rejected; optional `lat`/`lng` overwrites stored location |
+| GET | `/tracks/{id}/revisions` | admin | Append-only edit history for a track |
 
 Admin endpoints require an `X-Admin-Token` header matching the backend's `ADMIN_TOKEN` env var.
 
@@ -116,5 +119,7 @@ Admin endpoints require an `X-Admin-Token` header matching the backend's `ADMIN_
 
 - Scanned tiles are cached in the database to avoid re-fetching the same satellite images. Cache entries expire automatically.
 - The scan endpoint deduplicates tiles to canonical slippy-map tile coordinates before fetching.
+- Every change to a track is recorded in the `track_revisions` table (create, verify, reject, metadata edits, manual adds).
+- Schema migrations for new columns run automatically at backend startup via `ensure_schema()`.
 - The training dataset has been removed from git. It may be uploaded to Kaggle later.
 

@@ -1,4 +1,5 @@
 import hmac
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -6,10 +7,11 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 import db as _db
-from inference import load_model, scan_area
+from inference import load_model, scan_area, scan_area_stream
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -98,7 +100,6 @@ class TrackSubmission(BaseModel):
     length_m: int | None = Field(default=None, ge=50, le=1000)
     is_indoor: bool | None = None
     access_type: str | None = None
-    country: str | None = None
     notes: str | None = None
 
 
@@ -117,8 +118,9 @@ class TrackMetadataUpdate(BaseModel):
     length_m: int | None = Field(default=None, ge=50, le=1000)
     is_indoor: bool | None = None
     access_type: str | None = None
-    country: str | None = None
     notes: str | None = None
+    lat: float | None = None
+    lng: float | None = None
 
 
 class AdminLoginRequest(BaseModel):
@@ -155,6 +157,18 @@ async def scan(req: ScanRequest):
         req.lat, req.lng, req.radius_km, req.threshold,
         db_pool=app.state.db_pool,
     )
+
+
+@app.post("/scan/stream", dependencies=[Depends(require_admin)])
+async def scan_stream(req: ScanRequest):
+    """Server-Sent Events: streams per-tile progress while the scan runs."""
+    async def event_source():
+        async for event in scan_area_stream(
+            req.lat, req.lng, req.radius_km, req.threshold,
+            db_pool=app.state.db_pool,
+        ):
+            yield f"data: {json.dumps(event)}\n\n"
+    return StreamingResponse(event_source(), media_type="text/event-stream")
 
 
 @app.post("/tracks", dependencies=[Depends(require_admin)])

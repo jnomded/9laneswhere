@@ -12,7 +12,6 @@ METADATA_COLUMNS = (
     "length_m",
     "is_indoor",
     "access_type",
-    "country",
     "notes",
 )
 
@@ -34,8 +33,9 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
             ALTER TABLE detected_tracks ADD COLUMN IF NOT EXISTS length_m     SMALLINT;
             ALTER TABLE detected_tracks ADD COLUMN IF NOT EXISTS is_indoor    BOOLEAN NOT NULL DEFAULT FALSE;
             ALTER TABLE detected_tracks ADD COLUMN IF NOT EXISTS access_type  TEXT;
-            ALTER TABLE detected_tracks ADD COLUMN IF NOT EXISTS country      TEXT;
             ALTER TABLE detected_tracks ADD COLUMN IF NOT EXISTS notes        TEXT;
+            -- country was added briefly then removed before the feature went out.
+            ALTER TABLE detected_tracks DROP COLUMN IF EXISTS country;
 
             CREATE TABLE IF NOT EXISTS track_revisions (
                 id           BIGSERIAL    PRIMARY KEY,
@@ -135,7 +135,7 @@ _TRACK_SELECT = """
     ST_X(location) AS lng,
     confidence, status, name, submitted_by, verified_by, verified_at,
     first_seen_at, last_confirmed_at, scan_count,
-    lane_count, surface, length_m, is_indoor, access_type, country, notes
+    lane_count, surface, length_m, is_indoor, access_type, notes
 """
 
 
@@ -305,12 +305,15 @@ async def update_track_metadata(
     revised_by: str | None,
 ) -> dict | None:
     """
-    Update any subset of editable metadata columns. Returns the updated row,
-    or None if the track doesn't exist. Caller is responsible for restricting
-    `fields` to safe column names; we additionally filter via METADATA_COLUMNS.
+    Update any subset of editable metadata columns + optional location relocate.
+    Returns the updated row, or None if the track doesn't exist. lat/lng are
+    handled specially since they map to the PostGIS geometry, not a plain column.
     """
+    lat = fields.get("lat")
+    lng = fields.get("lng")
     safe = {k: v for k, v in fields.items() if k in METADATA_COLUMNS}
-    if not safe:
+
+    if not safe and (lat is None or lng is None):
         return await get_track(pool, track_id)
 
     set_clauses = []
@@ -318,6 +321,12 @@ async def update_track_metadata(
     for col, val in safe.items():
         params.append(val)
         set_clauses.append(f"{col} = ${len(params)}")
+    if lat is not None and lng is not None:
+        params.append(lng)
+        params.append(lat)
+        set_clauses.append(
+            f"location = ST_SetSRID(ST_MakePoint(${len(params) - 1}, ${len(params)}), 4326)"
+        )
 
     async with pool.acquire() as conn:
         old = await _fetch_track(conn, track_id)
